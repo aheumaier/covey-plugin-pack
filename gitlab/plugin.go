@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -86,7 +85,8 @@ func init() {
     Looking after a PERSON's issues instead (your manager's, say)? Use
     nur-wenn: gitlab:issues:assignee:<username>, or narrowed to one project
     nur-wenn: gitlab:issues:assignee:<username>:<group/project>, and list them
-    with list_issues {"assignee":"<username>","project_id":N}.
+    with list_issues {"assignee":"<username>","project_id":N}. Every open
+    issue of ONE project: nur-wenn: gitlab:issues:project:<group/project>.
    Optional project filter (applies to list_issues/list_projects):
    COVEY_GITLAB_INTAKE_PROJECTS="group/support"   (empty = all)
 
@@ -107,11 +107,17 @@ func issueProjectPath(i Issue) string {
 	return ""
 }
 
-// assigneeKind reads the nur-wenn kind "issues:assignee:<username>[:<project>]"
-// (the "issues:" in front may be "issue:" or left out). ok is false for every
-// other kind; an empty username comes back as ok with login "" so that the
-// caller can refuse it instead of falling through to "everything".
-func assigneeKind(kind string) (login, project string, ok bool) {
+// issueGate reads the nur-wenn kinds that narrow the issue gate by person and
+// project (the "issues:" in front may be "issue:" or left out):
+//
+//	issues:assignee:<username>                  that person's open issues
+//	issues:assignee:<username>:<group/project>  …in one project
+//	issues:project:<group/project>              every open issue of one project
+//
+// ok is false for every other kind. A gate whose username or project is empty
+// comes back ok with an error, so that it is refused instead of falling
+// through to "everything".
+func issueGate(kind string) (f IssueFilter, ok bool, err error) {
 	rest := kind
 	for _, p := range []string{"issues:", "issue:"} {
 		if strings.HasPrefix(rest, p) {
@@ -119,25 +125,24 @@ func assigneeKind(kind string) (login, project string, ok bool) {
 			break
 		}
 	}
-	if !strings.HasPrefix(rest, "assignee:") && rest != "assignee" {
-		return "", "", false
+	f.State = "opened"
+	switch {
+	case rest == "assignee" || strings.HasPrefix(rest, "assignee:"):
+		login, project, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(rest, "assignee"), ":"), ":")
+		f.Assignee = strings.TrimPrefix(strings.TrimSpace(login), "@")
+		f.Project = strings.Trim(strings.TrimSpace(project), "/")
+		if f.Assignee == "" {
+			return f, true, fmt.Errorf("gitlab:issues:assignee needs a username (gitlab:issues:assignee:<username>[:<group/project>])")
+		}
+		return f, true, nil
+	case rest == "project" || strings.HasPrefix(rest, "project:"):
+		f.Project = strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(rest, "project"), ":")), "/")
+		if f.Project == "" {
+			return f, true, fmt.Errorf("gitlab:issues:project needs a project (gitlab:issues:project:<group/project>)")
+		}
+		return f, true, nil
 	}
-	rest = strings.TrimPrefix(strings.TrimPrefix(rest, "assignee"), ":")
-	login, project, _ = strings.Cut(rest, ":")
-	return strings.TrimPrefix(strings.TrimSpace(login), "@"), strings.TrimSpace(project), true
-}
-
-// projectMatches: does an issue of projectID/path belong to the project a
-// heartbeat names — by path (case does not matter, as in GitLab) or by numeric
-// id. An empty project matches everything.
-func projectMatches(project string, projectID int, path string) bool {
-	if project == "" {
-		return true
-	}
-	if project == strconv.Itoa(projectID) {
-		return true
-	}
-	return strings.EqualFold(strings.Trim(project, "/"), path)
+	return IssueFilter{}, false, nil
 }
 
 // mrProjectPath derives the project path from the full MR reference
@@ -189,6 +194,8 @@ func (System) HasWork(ctx context.Context, cred target.Credential) (bool, error)
 //     numeric id)? For an agent that looks after someone else's queue — its
 //     manager's, say — in one project, beside the installation-wide intake
 //     scope rather than instead of it.
+//   - "issues:project:<project>" → is any open issue of that one project
+//     waiting? gitlab:issues for a single project, per heartbeat.
 //   - "mr"/"mrs"        → is one of the MRs the bot opened ITSELF waiting for
 //     an answer (the author's view, the developer review loop)?
 //   - "review"/"reviews" → is one of the MRs in which the bot is entered as
@@ -213,11 +220,11 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 		waiting []string
 		err     error
 	)
-	if login, project, ok := assigneeKind(kind); ok {
-		if login == "" {
-			return false, "", fmt.Errorf("gitlab:issues:assignee needs a username (gitlab:issues:assignee:<username>[:<group/project>])")
+	if f, ok, gateErr := issueGate(kind); ok {
+		if gateErr != nil {
+			return false, "", gateErr
 		}
-		waiting, err = issuesWaiting(ctx, gc, IssueFilter{State: "opened", Assignee: login}, project)
+		waiting, err = issuesWaiting(ctx, gc, f)
 		if err != nil {
 			return false, "", err
 		}
@@ -338,19 +345,20 @@ const issueMaxNotesChecks = 30
 // — with a real handoff, that comment now needs to change the note count for
 // the new signature to differ, which any real comment does.
 func issueWorkPending(ctx context.Context, gc *Client, assignedOnly bool) ([]string, error) {
-	return issuesWaiting(ctx, gc, IssueFilter{State: "opened", Assigned: assignedOnly}, "")
+	return issuesWaiting(ctx, gc, IssueFilter{State: "opened", Assigned: assignedOnly})
 }
 
-// issuesWaiting is issueWorkPending for any filter, narrowed to one project
-// when project is set (path or numeric id, see projectMatches).
-func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter, project string) ([]string, error) {
+// issuesWaiting is issueWorkPending for any filter. With f.Project the list
+// comes from that project alone (GET /projects/{path}/issues), and the
+// installation-wide intake scope still applies on top.
+func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter) ([]string, error) {
 	issues, err := gc.ListIssuesWhere(ctx, 0, f)
 	if err != nil {
 		return nil, err
 	}
 	inScope := issues[:0]
 	for _, i := range issues {
-		if projectInScope(i.ProjectID, issueProjectPath(i)) && projectMatches(project, i.ProjectID, issueProjectPath(i)) {
+		if projectInScope(i.ProjectID, issueProjectPath(i)) {
 			inScope = append(inScope, i)
 		}
 	}

@@ -267,6 +267,10 @@ type IssueFilter struct {
 	State, Labels, Search, Milestone string
 	Assigned                         bool
 	Assignee                         string
+	// Project names the project by path ("group/app") or id when the caller
+	// has no numeric projectID — a heartbeat gate is written by hand, and a
+	// path is what a person reads off the URL.
+	Project string
 }
 
 // ListIssuesWhere is ListIssues with the filter as a struct, so that a new
@@ -311,6 +315,8 @@ func (c *Client) ListIssuesWhere(ctx context.Context, projectID int, f IssueFilt
 		path := "/issues?" + q.Encode()
 		if projectID != 0 {
 			path = fmt.Sprintf("/projects/%d/issues?%s", projectID, q.Encode())
+		} else if p := strings.Trim(strings.TrimSpace(f.Project), "/"); p != "" {
+			path = "/projects/" + url.PathEscape(p) + "/issues?" + q.Encode()
 		} else if !assigned {
 			path = "/issues?scope=all&" + q.Encode()
 		}
