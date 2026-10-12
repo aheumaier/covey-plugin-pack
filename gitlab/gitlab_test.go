@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,6 +210,14 @@ func TestClientDiscovery(t *testing.T) {
 	}
 	if gotPath != "/api/v4/projects/15/issues" || !strings.Contains(gotQuery, "scope=assigned_to_me") {
 		t.Fatalf("assigned=true must send scope=assigned_to_me project-scoped too: %s?%s", gotPath, gotQuery)
+	}
+
+	// Someone else's queue: assignee becomes assignee_username, beside scope=all.
+	if _, err := c.ListIssuesWhere(ctx, 0, IssueFilter{Assignee: "ada"}); err != nil {
+		t.Fatalf("ListIssuesWhere (assignee): %v", err)
+	}
+	if !strings.Contains(gotQuery, "assignee_username=ada") || !strings.Contains(gotQuery, "scope=all") {
+		t.Fatalf("assignee must be sent as assignee_username: %s", gotQuery)
 	}
 
 	// The milestone: the filter with which an agent grasps a whole undertaking.
@@ -3719,5 +3728,86 @@ func TestCheckoutZweimalDerselbePfadVerschachteltNicht(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "stupla", "stupla")); err == nil {
 		t.Fatal("der zweite Abruf desselben Pfades hat verschachtelt: <path>/<path>")
+	}
+}
+
+// TestHasWorkKindIssuesAssignee checks nur-wenn: gitlab:issues:assignee — an
+// agent that looks after a person's queue wakes on the open issues assigned to
+// THAT person (assignee_username), and with a project only on that project's
+// (#49).
+func TestHasWorkKindIssuesAssignee(t *testing.T) {
+	var issues []Issue
+	var sawQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v4/issues":
+			sawQuery = r.URL.Query()
+			json.NewEncoder(w).Encode(issues)
+		case strings.HasSuffix(r.URL.Path, "/notes"):
+			serveNotes(w, r, nil)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	sys := System{}
+	cred := target.Credential{BaseURL: srv.URL, Token: "t"}
+	ctx := context.Background()
+
+	app := Issue{IID: 7, ProjectID: 40}
+	app.References.Full = "gruppe/app#7"
+	other := Issue{IID: 3, ProjectID: 41}
+	other.References.Full = "gruppe/anderes#3"
+
+	issues = []Issue{other}
+	if has, err := sys.HasWorkKind(ctx, cred, "issues:assignee:ada"); err != nil || !has {
+		t.Fatalf("without a project every assigned issue counts: has=%v err=%v", has, err)
+	}
+	if sawQuery.Get("assignee_username") != "ada" || sawQuery.Get("scope") != "all" || sawQuery.Get("state") != "opened" {
+		t.Fatalf("the gate must ask for ada's open issues across everything visible: %v", sawQuery)
+	}
+
+	// Narrowed to one project: someone's issue elsewhere stays quiet.
+	if has, err := sys.HasWorkKind(ctx, cred, "issues:assignee:ada:gruppe/app"); err != nil || has {
+		t.Fatalf("an issue in another project must not wake: has=%v err=%v", has, err)
+	}
+	issues = []Issue{other, app}
+	for _, kind := range []string{"issues:assignee:ada:gruppe/app", "issues:assignee:ada:Gruppe/App", "assignee:@ada:40"} {
+		has, sig, err := sys.HasWorkSigned(ctx, cred, kind)
+		if err != nil || !has {
+			t.Fatalf("%q: the project's issue must wake: has=%v err=%v", kind, has, err)
+		}
+		if sig != "issue40!7@0" {
+			t.Fatalf("%q: only the project's issue belongs in the signature: %s", kind, sig)
+		}
+	}
+	if sawQuery.Get("assignee_username") != "ada" {
+		t.Fatalf("a leading @ is not part of the username: %v", sawQuery)
+	}
+
+	if _, err := sys.HasWorkKind(ctx, cred, "issues:assignee:"); err == nil {
+		t.Fatal("an assignee gate without a username must be refused, not read as everything")
+	}
+}
+
+func TestAssigneeKind(t *testing.T) {
+	cases := []struct {
+		kind, login, project string
+		ok                   bool
+	}{
+		{"issues:assignee:ada", "ada", "", true},
+		{"issue:assignee:ada:gruppe/app", "ada", "gruppe/app", true},
+		{"assignee:ada:40", "ada", "40", true},
+		{"issues:assignee", "", "", true},
+		{"issues:assigned", "", "", false},
+		{"issues", "", "", false},
+		{"review", "", "", false},
+	}
+	for _, c := range cases {
+		login, project, ok := assigneeKind(c.kind)
+		if login != c.login || project != c.project || ok != c.ok {
+			t.Errorf("assigneeKind(%q) = %q, %q, %v; expected %q, %q, %v", c.kind, login, project, ok, c.login, c.project, c.ok)
+		}
 	}
 }

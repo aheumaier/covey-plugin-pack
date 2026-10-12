@@ -254,6 +254,25 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 // assigned to the token's bot user (scope=assigned_to_me) — for agents that,
 // according to their playbook, only work on their own assignment.
 func (c *Client) ListIssues(ctx context.Context, projectID int, state, labels, search, milestone string, assigned bool) ([]Issue, error) {
+	return c.ListIssuesWhere(ctx, projectID, IssueFilter{
+		State: state, Labels: labels, Search: search, Milestone: milestone, Assigned: assigned,
+	})
+}
+
+// IssueFilter narrows ListIssuesWhere. The fields are ListIssues' parameters,
+// plus Assignee: a GitLab username whose assignment is wanted
+// (assignee_username) — someone else's queue, where Assigned can only name the
+// token's own user.
+type IssueFilter struct {
+	State, Labels, Search, Milestone string
+	Assigned                         bool
+	Assignee                         string
+}
+
+// ListIssuesWhere is ListIssues with the filter as a struct, so that a new
+// narrowing does not change the signature foreign callers build against.
+func (c *Client) ListIssuesWhere(ctx context.Context, projectID int, f IssueFilter) ([]Issue, error) {
+	state, labels, search, milestone, assigned := f.State, f.Labels, f.Search, f.Milestone, f.Assigned
 	q := url.Values{}
 	if state == "" {
 		state = "opened"
@@ -272,6 +291,9 @@ func (c *Client) ListIssues(ctx context.Context, projectID int, state, labels, s
 	}
 	if assigned {
 		q.Set("scope", "assigned_to_me")
+	}
+	if a := strings.TrimPrefix(strings.TrimSpace(f.Assignee), "@"); a != "" {
+		q.Set("assignee_username", a)
 	}
 	q.Set("order_by", "updated_at")
 	q.Set("per_page", strconv.Itoa(issuePageSize))
