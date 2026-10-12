@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,6 +210,14 @@ func TestClientDiscovery(t *testing.T) {
 	}
 	if gotPath != "/api/v4/projects/15/issues" || !strings.Contains(gotQuery, "scope=assigned_to_me") {
 		t.Fatalf("assigned=true must send scope=assigned_to_me project-scoped too: %s?%s", gotPath, gotQuery)
+	}
+
+	// Someone else's queue: assignee becomes assignee_username, beside scope=all.
+	if _, err := c.ListIssuesWhere(ctx, 0, IssueFilter{Assignee: "ada"}); err != nil {
+		t.Fatalf("ListIssuesWhere (assignee): %v", err)
+	}
+	if !strings.Contains(gotQuery, "assignee_username=ada") || !strings.Contains(gotQuery, "scope=all") {
+		t.Fatalf("assignee must be sent as assignee_username: %s", gotQuery)
 	}
 
 	// The milestone: the filter with which an agent grasps a whole undertaking.
@@ -3719,5 +3728,88 @@ func TestCheckoutZweimalDerselbePfadVerschachteltNicht(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "stupla", "stupla")); err == nil {
 		t.Fatal("der zweite Abruf desselben Pfades hat verschachtelt: <path>/<path>")
+	}
+}
+
+// TestHasWorkKindIssuesAssignee checks nur-wenn: gitlab:issues:assignee and
+// gitlab:issues:project — an agent wakes on the open issues assigned to a
+// PERSON (assignee_username), on those of one project, or both (#49). With a
+// project the list comes from that project's own endpoint, not from
+// everything the token can see.
+func TestHasWorkKindIssuesAssignee(t *testing.T) {
+	var issues []Issue
+	var sawPath string
+	var sawQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/notes"):
+			serveNotes(w, r, nil)
+		case strings.HasSuffix(r.URL.Path, "/issues"):
+			sawPath, sawQuery = r.URL.EscapedPath(), r.URL.Query()
+			json.NewEncoder(w).Encode(issues)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	sys := System{}
+	cred := target.Credential{BaseURL: srv.URL, Token: "t"}
+	ctx := context.Background()
+
+	app := Issue{IID: 7, ProjectID: 40}
+	app.References.Full = "gruppe/app#7"
+
+	issues = nil
+	if has, err := sys.HasWorkKind(ctx, cred, "issues:assignee:ada"); err != nil || has {
+		t.Fatalf("nothing assigned, nothing to do: has=%v err=%v", has, err)
+	}
+	if sawPath != "/api/v4/issues" || sawQuery.Get("assignee_username") != "ada" || sawQuery.Get("scope") != "all" || sawQuery.Get("state") != "opened" {
+		t.Fatalf("without a project the gate must ask for ada's open issues across everything visible: %s %v", sawPath, sawQuery)
+	}
+
+	issues = []Issue{app}
+	has, sig, err := sys.HasWorkSigned(ctx, cred, "issues:assignee:@ada:gruppe/app")
+	if err != nil || !has || sig != "issue40!7@0" {
+		t.Fatalf("ada's issue in the project must wake: has=%v sig=%q err=%v", has, sig, err)
+	}
+	if sawPath != "/api/v4/projects/gruppe%2Fapp/issues" || sawQuery.Get("assignee_username") != "ada" {
+		t.Fatalf("with a project the gate must ask that project, for ada, without the @: %s %v", sawPath, sawQuery)
+	}
+
+	if has, err := sys.HasWorkKind(ctx, cred, "issues:project:gruppe/app"); err != nil || !has {
+		t.Fatalf("every open issue of the project must wake: has=%v err=%v", has, err)
+	}
+	if sawPath != "/api/v4/projects/gruppe%2Fapp/issues" || sawQuery.Get("assignee_username") != "" || sawQuery.Get("state") != "opened" {
+		t.Fatalf("the project gate must ask that project for its open issues, nobody's in particular: %s %v", sawPath, sawQuery)
+	}
+
+	for _, kind := range []string{"issues:assignee:", "issues:project:", "project"} {
+		if _, err := sys.HasWorkKind(ctx, cred, kind); err == nil {
+			t.Fatalf("%q must be refused, not read as everything", kind)
+		}
+	}
+}
+
+func TestIssueGate(t *testing.T) {
+	cases := []struct {
+		kind, assignee, project string
+		ok, err                 bool
+	}{
+		{"issues:assignee:ada", "ada", "", true, false},
+		{"issue:assignee:ada:gruppe/app", "ada", "gruppe/app", true, false},
+		{"assignee:ada:40", "ada", "40", true, false},
+		{"issues:project:gruppe/app/", "", "gruppe/app", true, false},
+		{"issues:assignee", "", "", true, true},
+		{"issues:project", "", "", true, true},
+		{"issues:assigned", "", "", false, false},
+		{"issues", "", "", false, false},
+		{"review", "", "", false, false},
+	}
+	for _, c := range cases {
+		f, ok, err := issueGate(c.kind)
+		if ok != c.ok || (err != nil) != c.err || (ok && !c.err && (f.Assignee != c.assignee || f.Project != c.project || f.State != "opened")) {
+			t.Errorf("issueGate(%q) = %+v, %v, %v", c.kind, f, ok, err)
+		}
 	}
 }

@@ -82,6 +82,11 @@ func init() {
     assigned=true), use nur-wenn: gitlab:issues:assigned. Then only an open issue
     assigned to you wakes you — otherwise every open issue of someone else's
     in the scope would start your agent needlessly in every interval.
+    Looking after a PERSON's issues instead (your manager's, say)? Use
+    nur-wenn: gitlab:issues:assignee:<username>, or narrowed to one project
+    nur-wenn: gitlab:issues:assignee:<username>:<group/project>, and list them
+    with list_issues {"assignee":"<username>","project_id":N}. Every open
+    issue of ONE project: nur-wenn: gitlab:issues:project:<group/project>.
    Optional project filter (applies to list_issues/list_projects):
    COVEY_GITLAB_INTAKE_PROJECTS="group/support"   (empty = all)
 
@@ -100,6 +105,44 @@ func issueProjectPath(i Issue) string {
 		return i.References.Full[:idx]
 	}
 	return ""
+}
+
+// issueGate reads the nur-wenn kinds that narrow the issue gate by person and
+// project (the "issues:" in front may be "issue:" or left out):
+//
+//	issues:assignee:<username>                  that person's open issues
+//	issues:assignee:<username>:<group/project>  …in one project
+//	issues:project:<group/project>              every open issue of one project
+//
+// ok is false for every other kind. A gate whose username or project is empty
+// comes back ok with an error, so that it is refused instead of falling
+// through to "everything".
+func issueGate(kind string) (f IssueFilter, ok bool, err error) {
+	rest := kind
+	for _, p := range []string{"issues:", "issue:"} {
+		if strings.HasPrefix(rest, p) {
+			rest = rest[len(p):]
+			break
+		}
+	}
+	f.State = "opened"
+	switch {
+	case rest == "assignee" || strings.HasPrefix(rest, "assignee:"):
+		login, project, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(rest, "assignee"), ":"), ":")
+		f.Assignee = strings.TrimPrefix(strings.TrimSpace(login), "@")
+		f.Project = strings.Trim(strings.TrimSpace(project), "/")
+		if f.Assignee == "" {
+			return f, true, fmt.Errorf("gitlab:issues:assignee needs a username (gitlab:issues:assignee:<username>[:<group/project>])")
+		}
+		return f, true, nil
+	case rest == "project" || strings.HasPrefix(rest, "project:"):
+		f.Project = strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(rest, "project"), ":")), "/")
+		if f.Project == "" {
+			return f, true, fmt.Errorf("gitlab:issues:project needs a project (gitlab:issues:project:<group/project>)")
+		}
+		return f, true, nil
+	}
+	return IssueFilter{}, false, nil
 }
 
 // mrProjectPath derives the project path from the full MR reference
@@ -146,6 +189,13 @@ func (System) HasWork(ctx context.Context, cred target.Credential) (bool, error)
 //     assigned=true) — otherwise every open issue of someone else's in the
 //     scope wakes it. "Waiting" means in both cases: the bot has not yet
 //     commented there last (see issueWorkPending).
+//   - "issues:assignee:<username>[:<project>]" → is an open issue waiting that
+//     is assigned to that PERSON, optionally only in one project (path or
+//     numeric id)? For an agent that looks after someone else's queue — its
+//     manager's, say — in one project, beside the installation-wide intake
+//     scope rather than instead of it.
+//   - "issues:project:<project>" → is any open issue of that one project
+//     waiting? gitlab:issues for a single project, per heartbeat.
 //   - "mr"/"mrs"        → is one of the MRs the bot opened ITSELF waiting for
 //     an answer (the author's view, the developer review loop)?
 //   - "review"/"reviews" → is one of the MRs in which the bot is entered as
@@ -170,6 +220,16 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 		waiting []string
 		err     error
 	)
+	if f, ok, gateErr := issueGate(kind); ok {
+		if gateErr != nil {
+			return false, "", gateErr
+		}
+		waiting, err = issuesWaiting(ctx, gc, f)
+		if err != nil {
+			return false, "", err
+		}
+		return len(waiting) > 0, workSig(waiting), nil
+	}
 	switch kind {
 	case "issues", "issue":
 		waiting, err = issueWorkPending(ctx, gc, false)
@@ -285,7 +345,14 @@ const issueMaxNotesChecks = 30
 // — with a real handoff, that comment now needs to change the note count for
 // the new signature to differ, which any real comment does.
 func issueWorkPending(ctx context.Context, gc *Client, assignedOnly bool) ([]string, error) {
-	issues, err := gc.ListIssues(ctx, 0, "opened", "", "", "", assignedOnly)
+	return issuesWaiting(ctx, gc, IssueFilter{State: "opened", Assigned: assignedOnly})
+}
+
+// issuesWaiting is issueWorkPending for any filter. With f.Project the list
+// comes from that project alone (GET /projects/{path}/issues), and the
+// installation-wide intake scope still applies on top.
+func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter) ([]string, error) {
+	issues, err := gc.ListIssuesWhere(ctx, 0, f)
 	if err != nil {
 		return nil, err
 	}
@@ -846,7 +913,10 @@ var aktionen = map[string]aktion{
 		return out, nil
 	},
 	"list_issues": func(ctx context.Context, gc *Client, in aktionsParams) (any, error) {
-		issues, err := gc.ListIssues(ctx, in.ProjectID, in.State, in.Labels, in.Search, in.Milestone, in.Assigned)
+		issues, err := gc.ListIssuesWhere(ctx, in.ProjectID, IssueFilter{
+			State: in.State, Labels: in.Labels, Search: in.Search, Milestone: in.Milestone,
+			Assigned: in.Assigned, Assignee: in.Assignee,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -1395,9 +1465,10 @@ func (System) PromptDocForScopes(scopes []string) string {
 	return doc
 }
 
-const promptDocActions = `Available GitLab actions: list_projects {}, list_issues {"project_id":N,"state":"opened"|"closed"|"all","labels":"...","search":"...","milestone":"...","assigned":true|false}
+const promptDocActions = `Available GitLab actions: list_projects {}, list_issues {"project_id":N,"state":"opened"|"closed"|"all","labels":"...","search":"...","milestone":"...","assigned":true|false,"assignee":"username"}
    (all fields optional; without project_id all the issues visible to you; assigned=true only the ones assigned
-   to your bot user — use that when your playbook only provides for assigned issues; milestone is the
+   to your bot user — use that when your playbook only provides for assigned issues; assignee only the ones
+   assigned to that GitLab user (someone else's queue, e.g. your manager's); milestone is the
    TITLE of the milestone exactly as in GitLab and is the most reliable filter when your assignment hangs off an
    engagement — every issue carries its milestone back in the field "milestone").
    CAUTION: list_issues returns at most 100 hits and does NOT tell you that it truncated. If you get exactly
