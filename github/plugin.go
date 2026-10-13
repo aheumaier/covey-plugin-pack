@@ -982,3 +982,8 @@ func (System) PromptDoc() string {
    7. Before every answer, check with list_pr_comments whether new commits/answers have arrived since your last review —
       then test again instead of repeating feedback you have already given.`
 }
+
+// SignsWorkItems (target.ItemSigner): the signature is one "<key>@<version>"
+// entry per waiting item, sorted and joined by commas — the shape
+// target.WorkSignature writes — so a host can read the items back out of it.
+func (System) SignsWorkItems() bool { return true }
