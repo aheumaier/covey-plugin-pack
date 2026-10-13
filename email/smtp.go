@@ -59,39 +59,51 @@ func buildMessage(o outgoing, now time.Time) []byte {
 	return []byte(b.String())
 }
 
-// sendMail delivers the message to the SMTP server. Auth only if the server
-// offers it (test doubles and internal relays get by without it).
-func sendMail(cfg Config, o outgoing) error {
-	msg := buildMessage(o, time.Now())
-	rcpts := append(append([]string{}, o.To...), o.Cc...)
-
+// dialSMTP connects, secures and logs in — everything up to the envelope.
+// Auth only if the server offers it (test doubles and internal relays get by
+// without it).
+func dialSMTP(cfg Config) (*smtp.Client, error) {
 	var c *smtp.Client
 	var err error
 	if cfg.SMTPTLS == tlsImplicit {
 		conn, dialErr := tls.Dial("tcp", cfg.SMTPAddr, tlsConfig(cfg.SMTPHost))
 		if dialErr != nil {
-			return fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, dialErr)
+			return nil, fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, dialErr)
 		}
 		c, err = smtp.NewClient(conn, cfg.SMTPHost)
 	} else {
 		c, err = smtp.Dial(cfg.SMTPAddr)
 	}
 	if err != nil {
-		return fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, err)
+		return nil, fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, err)
 	}
-	defer c.Close()
-
 	if cfg.SMTPTLS == tlsStartTLS {
 		if err := c.StartTLS(tlsConfig(cfg.SMTPHost)); err != nil {
-			return fmt.Errorf("smtp starttls: %w", err)
+			c.Close()
+			return nil, fmt.Errorf("smtp starttls: %w", err)
 		}
 	}
 	if ok, _ := c.Extension("AUTH"); ok {
 		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.SMTPHost)
 		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp login as %s: %w", cfg.Username, err)
+			c.Close()
+			return nil, fmt.Errorf("smtp login as %s: %w", cfg.Username, err)
 		}
 	}
+	return c, nil
+}
+
+// sendMail delivers the message to the SMTP server.
+func sendMail(cfg Config, o outgoing) error {
+	msg := buildMessage(o, time.Now())
+	rcpts := append(append([]string{}, o.To...), o.Cc...)
+
+	c, err := dialSMTP(cfg)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
 	if err := c.Mail(o.From); err != nil {
 		return fmt.Errorf("smtp sender %s: %w", o.From, err)
 	}

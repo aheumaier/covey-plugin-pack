@@ -853,3 +853,28 @@ func TestExecuteReplyCopies(t *testing.T) {
 		t.Fatal("a copy outside the allowlist has to fail")
 	}
 }
+
+func TestProbeLogsInOnBothSidesAndSendsNothing(t *testing.T) {
+	imapAddr := newMemIMAP(t, testUser, "pw")
+	smtp := newFakeSMTP(t)
+	cred := testCred(t, imapAddr, smtp.ln.Addr().String())
+	cred.BaseURL += "?cc=lead@example.com"
+	appendMail(t, imapAddr, testUser, "pw", "From: kunde@example.com\r\nSubject: a\r\n\r\nx\r\n", false)
+	appendMail(t, imapAddr, testUser, "pw", "From: kunde@example.com\r\nSubject: b\r\n\r\ny\r\n", true)
+
+	id, err := (System{}).Probe(context.Background(), cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != testUser+" (INBOX: 1 unread; copy on every mail: lead@example.com)" {
+		t.Fatalf("identity: %q", id)
+	}
+	if from, rcpts, _ := smtp.snapshot(); from != "" || len(rcpts) != 0 {
+		t.Fatalf("a probe must not open an envelope: %q → %v", from, rcpts)
+	}
+
+	cred.Token = testUser + ":wrong"
+	if _, err := (System{}).Probe(context.Background(), cred); err == nil || !strings.Contains(err.Error(), "imap login") {
+		t.Fatalf("a wrong password has to fail on the login, got %v", err)
+	}
+}
