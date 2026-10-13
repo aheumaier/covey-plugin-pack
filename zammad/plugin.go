@@ -165,7 +165,8 @@ func (System) Execute(ctx context.Context, action string, params json.RawMessage
 //	       "me"       → the token's own user only
 //	       "nobody"   → unassigned tickets
 //	       anything else → a login or e-mail
-//	state: ""/"open" → new + open (type); otherwise one state by its name
+//	state: ""/"open" → new + open (type); "pending" → pending reminder (type);
+//	       otherwise one state by its name
 func listTickets(ctx context.Context, zc *Client, owner, state string, limit int) ([]Ticket, error) {
 	var owners []int
 	switch strings.ToLower(strings.TrimSpace(owner)) {
@@ -192,6 +193,12 @@ func listTickets(ctx context.Context, zc *Client, owner, state string, limit int
 			return nil, err
 		}
 		states = ids
+	case "pending":
+		ids, err := zc.PendingStateIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		states = ids
 	case "any", "all":
 		states = nil
 	default:
@@ -206,10 +213,11 @@ func listTickets(ctx context.Context, zc *Client, owner, state string, limit int
 
 func (System) PromptDoc() string {
 	return `Available Zammad actions:
-   list_tickets {"owner":"queue"|"me"|"nobody"|"<login or e-mail>","state":"open"|"any"|"<state name>","limit":N}
+   list_tickets {"owner":"queue"|"me"|"nobody"|"<login or e-mail>","state":"open"|"pending"|"any"|"<state name>","limit":N}
      — the tickets assigned to an owner, newest activity first. Defaults: owner "queue" (the
      agent's own user plus the owner the credential is configured for), state "open" (new + open;
-     pending, closed and merged are not work), limit 20.
+     pending, closed and merged are not work), limit 20. State "pending" is the tickets waiting
+     on a reminder, whatever the instance calls that state.
    search_tickets {"query":"…","limit":N} — full-text search over title, number and articles.
    get_ticket {"ticket_id":N}, list_articles {"ticket_id":N} (the whole history, oldest first,
      internal notes marked), reply {"ticket_id":N,"body":"...","internal":true|false}

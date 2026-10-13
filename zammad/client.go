@@ -317,8 +317,8 @@ type ticketState struct {
 }
 
 // WorkStateIDs are the states in which a ticket waits for somebody on the
-// company's side: type "new" and type "open". Pending states are left out on
-// purpose — a ticket set to "pending reminder" is waiting for a date or for
+// company's side: type "new" and type "open". Pending states are left out by
+// default — a ticket set to "pending reminder" usually waits for a date or for
 // the customer, and Zammad moves it back to open by itself when the customer
 // writes. Closed and merged are over. Read once per client; the names are
 // installation-specific (a German instance says "offen"), the types are not.
@@ -326,29 +326,48 @@ func (c *Client) WorkStateIDs(ctx context.Context) ([]int, error) {
 	if c.workOpen != nil {
 		return c.workOpen, nil
 	}
+	ids, err := c.stateIDsOfType(ctx, "new", "open")
+	if err != nil {
+		return nil, err
+	}
+	c.workOpen = ids
+	return ids, nil
+}
+
+// PendingStateIDs are the states of type "pending reminder" — the ones the
+// ":pending" poll suffix and list_tickets state "pending" add. Type "pending
+// action" (pending close) stays out: it waits for the customer by definition.
+func (c *Client) PendingStateIDs(ctx context.Context) ([]int, error) {
+	return c.stateIDsOfType(ctx, "pending reminder")
+}
+
+// stateIDsOfType are the active states of the given types; an instance that
+// does not expand the type falls back to the default state of the same name.
+func (c *Client) stateIDsOfType(ctx context.Context, types ...string) ([]int, error) {
 	var states []ticketState
 	if err := c.do(ctx, http.MethodGet, "/ticket_states?expand=true", nil, &states); err != nil {
 		return nil, err
+	}
+	want := func(v string) bool {
+		for _, t := range types {
+			if strings.EqualFold(v, t) {
+				return true
+			}
+		}
+		return false
 	}
 	var ids []int
 	for _, s := range states {
 		if !s.Active {
 			continue
 		}
-		switch strings.ToLower(s.StateType) {
-		case "new", "open":
+		if s.StateType != "" && want(s.StateType) || s.StateType == "" && want(s.Name) {
 			ids = append(ids, s.ID)
-		case "":
-			// No expansion — an older instance. Fall back to the default names.
-			if n := strings.ToLower(s.Name); n == "new" || n == "open" {
-				ids = append(ids, s.ID)
-			}
 		}
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("zammad: no active ticket state of type new or open found (%d states read)", len(states))
+		return nil, fmt.Errorf("zammad: no active ticket state of type %s found (%d states read)", strings.Join(types, " or "), len(states))
 	}
-	c.workOpen = ids
 	return ids, nil
 }
 

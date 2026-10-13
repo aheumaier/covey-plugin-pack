@@ -35,6 +35,11 @@ func (System) HasWork(ctx context.Context, cred target.Credential) (bool, error)
 //	zammad:unassigned     (also "new", "open")            — open tickets nobody owns
 //	zammad:owner:<login>  — that person's open tickets, and the agent's own
 //
+// A trailing ":pending" (zammad:owner:<login>:pending, zammad:assigned:pending)
+// counts the tickets waiting on a reminder as well. A colleague who parks a
+// ticket with a reminder and hands it on has still handed on work; without the
+// suffix such a ticket wakes nobody until Zammad reopens it on the date.
+//
 // The queue is the configured owner= plus the token's own user, see
 // Client.QueueOwnerIDs; owner:<login> names the person in the heartbeat
 // instead of the credential — the same thing, for an installation that
@@ -52,6 +57,7 @@ func (System) HasWorkKind(ctx context.Context, cred target.Credential, kind stri
 // writes, because that moves updated_at.
 func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind string) (bool, string, error) {
 	c := NewClient(cred.BaseURL, cred.Token)
+	kind, withPending := cutPending(kind)
 	owners, err := pollOwners(ctx, c, kind)
 	if err != nil {
 		return false, "", err
@@ -59,6 +65,13 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 	states, err := c.WorkStateIDs(ctx)
 	if err != nil {
 		return false, "", err
+	}
+	if withPending {
+		pending, err := c.PendingStateIDs(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		states = append(append([]int(nil), states...), pending...)
 	}
 	tickets, err := c.ListTickets(ctx, owners, states, pollMaxTickets)
 	if err != nil {
@@ -76,7 +89,23 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 		return false, "", nil
 	}
 	sort.Strings(entries) // stable: the search order is by activity, the signature must not be
-	return true, "zammad:" + pollKind(kind) + ":" + strings.Join(entries, ","), nil
+	family := pollKind(kind)
+	if withPending {
+		family += ":pending"
+	}
+	return true, "zammad:" + family + ":" + strings.Join(entries, ","), nil
+}
+
+// cutPending splits the ":pending" suffix off a poll kind.
+func cutPending(kind string) (string, bool) {
+	k := strings.TrimSpace(kind)
+	if n := len(k) - len(":pending"); n >= 0 && strings.EqualFold(k[n:], ":pending") {
+		return k[:n], true
+	}
+	if strings.EqualFold(k, "pending") {
+		return "", true
+	}
+	return k, false
 }
 
 // pollKind normalises the heartbeat's sub-scope to its family; owner:<x>
