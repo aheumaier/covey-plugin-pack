@@ -379,3 +379,50 @@ func TestReplyContentTypeFollowsTheBody(t *testing.T) {
 		t.Error("an explicit content_type wins over the guess")
 	}
 }
+
+func TestPollPendingSuffixAddsReminderStates(t *testing.T) {
+	f := &fakeHost{t: t, hits: []map[string]any{hit(21, "Ben Owner", 3, "warten auf Erinnerung", "2026-10-13T08:51:03Z")}}
+	f.install()
+
+	if _, _, err := (plugin{}).Poll("owner:ben@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.state_id"); v != "1,2" {
+		t.Fatalf("without the suffix the pre-check stays on new+open: %q", v)
+	}
+
+	has, sig, err := (plugin{}).Poll("owner:ben@example.org:pending")
+	if err != nil || !has {
+		t.Fatalf("has=%v err=%v", has, err)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.state_id"); v != "1,2,3" {
+		t.Fatalf(":pending adds the pending reminder states: %q", v)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.owner_id"); v != "7,3" {
+		t.Fatalf("the suffix must not end up in the owner's name: %q", v)
+	}
+	if sig != "zammad:owner:ben@example.org:pending:ticket:21@2026-10-13T08:51:03Z" {
+		t.Fatalf("the pending heartbeat keeps a watermark of its own: %q", sig)
+	}
+
+	if _, _, err := (plugin{}).Poll("assigned:PENDING"); err != nil {
+		t.Fatal(err)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.owner_id"); v != "7" {
+		t.Fatalf("assigned:pending is the token's user: %q", v)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.state_id"); v != "1,2,3" {
+		t.Fatalf("assigned:pending states: %q", v)
+	}
+}
+
+func TestListTicketsPendingIsByType(t *testing.T) {
+	f := &fakeHost{t: t}
+	f.install()
+	if _, err := listTickets("ben", "pending", 5); err != nil {
+		t.Fatal(err)
+	}
+	if v := selectorValues(f.lastSearch, "ticket.state_id"); v != "3" {
+		t.Fatalf(`"pending" must find the localised pending reminder state by type: %q`, v)
+	}
+}

@@ -32,7 +32,7 @@ func (plugin) Describe() covey.Description {
 	return covey.Description{
 		Name:        "zammad",
 		Label:       "Zammad",
-		Description: "Open-source helpdesk: find the tickets assigned to the agent (list_tickets), search the archive (search_tickets), read a ticket with its whole conversation (get_ticket/list_articles), reply as an internal note or a customer-visible answer (reply), move it on (set_state), take or hand over a ticket (assign) and give it back to the group when it does not belong to an agent (escalate). Takes up work by polling (nur-wenn: zammad:assigned) or by trigger webhooks; auth by API token (secrets zammad_token + zammad_url).",
+		Description: "Open-source helpdesk: find the tickets assigned to the agent (list_tickets), search the archive (search_tickets), read a ticket with its whole conversation (get_ticket/list_articles), reply as an internal note or a customer-visible answer (reply), move it on (set_state), take or hand over a ticket (assign) and give it back to the group when it does not belong to an agent (escalate). Takes up work by polling (nur-wenn: zammad:assigned, or zammad:owner:<login> for a person's queue; a :pending suffix counts tickets waiting on a reminder too) or by trigger webhooks; auth by API token (secrets zammad_token + zammad_url).",
 		Category:    "ticketing",
 		Scopes:      []string{"read", "write", "comment"},
 		// Zammad does not take a bearer token. The module says where the
@@ -45,7 +45,7 @@ func (plugin) Describe() covey.Description {
 		// The pre-check behind nur-wenn: zammad — see Poll.
 		Poll: true,
 		Actions: []covey.ActionDesc{
-			{Name: "list_tickets", Scope: "read", Doc: `{"owner":"me"|"nobody"|"<login or e-mail>","state":"open"|"any"|"<state name>","limit":N} — the tickets assigned to an owner, newest activity first. Defaults: owner "me" (your own Zammad user; name a login or e-mail to see a colleague's queue), state "open" (new + open; pending, closed and merged are not work), limit 20.`},
+			{Name: "list_tickets", Scope: "read", Doc: `{"owner":"me"|"nobody"|"<login or e-mail>","state":"open"|"pending"|"any"|"<state name>","limit":N} — the tickets assigned to an owner, newest activity first. Defaults: owner "me" (your own Zammad user; name a login or e-mail to see a colleague's queue), state "open" (new + open; pending, closed and merged are not work), limit 20. State "pending" is the tickets waiting on a reminder, whatever the instance calls that state.`},
 			{Name: "search_tickets", Scope: "read", Doc: `{"query":"…","limit":N} — full-text search over title, number and articles, for "has the house answered this before".`},
 			{Name: "get_ticket", Scope: "read", Doc: `{"ticket_id":N} — the ticket with state, group, priority, owner and customer.`},
 			{Name: "list_articles", Scope: "read", Doc: `{"ticket_id":N} — the whole conversation, oldest first. Sender tells a customer message from your own.`},
@@ -425,6 +425,11 @@ const pollMaxTickets = 100
 //	zammad:unassigned                     — open tickets nobody owns
 //	zammad:owner:<login or e-mail>        — that person's tickets, and the agent's own
 //
+// A trailing ":pending" (zammad:owner:<login>:pending, zammad:assigned:pending)
+// counts the tickets waiting on a reminder as well. A colleague who parks a
+// ticket with a reminder and hands it on has still handed on work; without the
+// suffix such a ticket wakes nobody until Zammad reopens it on the date.
+//
 // The third form is how a person routes work to an agent without a Zammad
 // account of its own for the agent: they assign the ticket to themselves and
 // the agent works it. The agent's own tickets are always included, so one
@@ -435,6 +440,7 @@ const pollMaxTickets = 100
 // without writing is not woken again by the same ticket a minute later, and
 // is woken the moment the customer writes, because that moves updated_at.
 func (plugin) Poll(kind string) (bool, string, error) {
+	kind, withPending := cutPending(kind)
 	owners, err := pollOwners(kind)
 	if err != nil {
 		return false, "", err
@@ -442,6 +448,13 @@ func (plugin) Poll(kind string) (bool, string, error) {
 	states, err := workStateIDs()
 	if err != nil {
 		return false, "", err
+	}
+	if withPending {
+		pending, err := pendingStateIDs()
+		if err != nil {
+			return false, "", err
+		}
+		states = append(states, pending...)
 	}
 	tickets, err := listByOwnersAndStates(owners, states, pollMaxTickets)
 	if err != nil {
@@ -455,7 +468,23 @@ func (plugin) Poll(kind string) (bool, string, error) {
 		entries = append(entries, fmt.Sprintf("ticket:%d@%s", t.ID, t.UpdatedAt))
 	}
 	sort.Strings(entries) // stable: the search order is by activity, the signature must not be
-	return true, "zammad:" + pollKind(kind) + ":" + strings.Join(entries, ","), nil
+	family := pollKind(kind)
+	if withPending {
+		family += ":pending"
+	}
+	return true, "zammad:" + family + ":" + strings.Join(entries, ","), nil
+}
+
+// cutPending splits the ":pending" suffix off a poll kind.
+func cutPending(kind string) (string, bool) {
+	k := strings.TrimSpace(kind)
+	if n := len(k) - len(":pending"); n >= 0 && strings.EqualFold(k[n:], ":pending") {
+		return k[:n], true
+	}
+	if strings.EqualFold(k, "pending") {
+		return "", true
+	}
+	return k, false
 }
 
 // pollKind normalises the sub-scope to its family; owner:<x> keeps the name,
@@ -536,33 +565,44 @@ func userID(who string) (int, error) {
 }
 
 // workStateIDs are the states in which a ticket waits for somebody on the
-// company's side: type "new" and type "open". Pending states are left out on
-// purpose — a ticket set to "pending reminder" waits for a date or for the
-// customer, and Zammad moves it back to open by itself when the customer
+// company's side: type "new" and type "open". Pending states are left out by
+// default — a ticket set to "pending reminder" usually waits for a date or for
+// the customer, and Zammad moves it back to open by itself when the customer
 // writes. Closed and merged are over. By type, not by name: the names are the
 // instance's own (a German instance says "offen"), the types are not.
-func workStateIDs() ([]int, error) {
+func workStateIDs() ([]int, error) { return stateIDsOfType("new", "open") }
+
+// pendingStateIDs are the states of type "pending reminder" — the ones the
+// ":pending" poll suffix and list_tickets state "pending" add. Type "pending
+// action" (pending close) stays out: it waits for the customer by definition.
+func pendingStateIDs() ([]int, error) { return stateIDsOfType("pending reminder") }
+
+// stateIDsOfType are the active states of the given types; an instance that
+// does not expand the type falls back to the default state of the same name.
+func stateIDsOfType(types ...string) ([]int, error) {
 	states, err := get[[]ticketState]("/api/v1/ticket_states?expand=true")
 	if err != nil {
 		return nil, err
+	}
+	want := func(v string) bool {
+		for _, t := range types {
+			if strings.EqualFold(v, t) {
+				return true
+			}
+		}
+		return false
 	}
 	var ids []int
 	for _, s := range states {
 		if !s.Active {
 			continue
 		}
-		switch strings.ToLower(s.StateType) {
-		case "new", "open":
+		if s.StateType != "" && want(s.StateType) || s.StateType == "" && want(s.Name) {
 			ids = append(ids, s.ID)
-		case "":
-			// No expansion — an older instance. Fall back to the default names.
-			if n := strings.ToLower(s.Name); n == "new" || n == "open" {
-				ids = append(ids, s.ID)
-			}
 		}
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("zammad: no active ticket state of type new or open found (%d states read)", len(states))
+		return nil, fmt.Errorf("zammad: no active ticket state of type %s found (%d states read)", strings.Join(types, " or "), len(states))
 	}
 	return ids, nil
 }
@@ -583,7 +623,8 @@ func stateIDByName(name string) (int, error) {
 // listTickets is the list_tickets action.
 //
 //	owner: ""/"me"/"queue" → the token's user; "nobody" → unassigned; else a login or e-mail
-//	state: ""/"open" → new + open (by type); "any" → no filter; else one state by name
+//	state: ""/"open" → new + open (by type); "pending" → pending reminder (by type);
+//	       "any" → no filter; else one state by name
 func listTickets(owner, state string, limit int) ([]ticket, error) {
 	var owners []int
 	switch strings.ToLower(strings.TrimSpace(owner)) {
@@ -608,6 +649,12 @@ func listTickets(owner, state string, limit int) ([]ticket, error) {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "", "open":
 		ids, err := workStateIDs()
+		if err != nil {
+			return nil, err
+		}
+		states = ids
+	case "pending":
+		ids, err := pendingStateIDs()
 		if err != nil {
 			return nil, err
 		}

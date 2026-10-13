@@ -444,3 +444,40 @@ func TestBodyContentType(t *testing.T) {
 		t.Error("an explicit content type wins")
 	}
 }
+
+func TestHasWorkSignedPendingSuffixAddsReminderStates(t *testing.T) {
+	f, srv := newFake(t, ticketJSON(21, "Ben Owner", 3, "warten auf Erinnerung", "Support", "2026-10-13T08:51:03Z"))
+	plain := target.Credential{BaseURL: srv.URL, Token: "t0k"}
+
+	if _, _, err := (System{}).HasWorkSigned(context.Background(), plain, "owner:ben"); err != nil {
+		t.Fatal(err)
+	}
+	if states := selectorValues(t, f.lastSearch, "ticket.state_id"); fmt.Sprint(states) != "[1 2]" {
+		t.Fatalf("without the suffix the pre-check stays on new+open: %v", states)
+	}
+
+	has, sig, err := (System{}).HasWorkSigned(context.Background(), plain, "owner:ben:pending")
+	if err != nil || !has {
+		t.Fatalf("has=%v err=%v", has, err)
+	}
+	if states := selectorValues(t, f.lastSearch, "ticket.state_id"); fmt.Sprint(states) != "[1 2 3]" {
+		t.Fatalf(":pending adds the pending reminder states: %v", states)
+	}
+	if owners := selectorValues(t, f.lastSearch, "ticket.owner_id"); fmt.Sprint(owners) != "[7 3]" {
+		t.Fatalf("the suffix must not end up in the owner's name: %v", owners)
+	}
+	if sig != "zammad:owner:ben:pending:ticket:21@2026-10-13T08:51:03Z" {
+		t.Fatalf("the pending heartbeat keeps a watermark of its own: %q", sig)
+	}
+}
+
+func TestListTicketsPendingIsByType(t *testing.T) {
+	f, srv := newFake(t)
+	c := NewClient(srv.URL, "t0k")
+	if _, err := listTickets(context.Background(), c, "ben", "pending", 5); err != nil {
+		t.Fatal(err)
+	}
+	if states := selectorValues(t, f.lastSearch, "ticket.state_id"); fmt.Sprint(states) != "[3]" {
+		t.Fatalf(`"pending" must find the localised pending reminder state by type: %v`, states)
+	}
+}
