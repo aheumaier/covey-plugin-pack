@@ -92,9 +92,16 @@ jobs:
       # not in the source at all (go1.26.5 → five findings, every one of them
       # "Fixed in go1.26.6"). Covey's own pipeline ran into this first; the
       # pack inherits the answer rather than the surprise.
+      #
+      # The line is pinned, not "stable": gosec type-checks with the export
+      # data of the Go it runs on, and a gosec release reads only the Go lines
+      # it was built against. When the runners took Go 1.27, gosec v2.28.0 and
+      # v2.29.0 both stopped on the standard library ("export data version 5
+      # is greater than maximum supported version 4"). 1.26 is the line go.mod
+      # builds against; move it when gosec reads the next one (#63).
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: "1.26"
           check-latest: true
           cache: true
 
@@ -129,7 +136,7 @@ jobs:
       # without types") rather than on our code.
       - name: gosec
         run: |
-          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 \
             -include=G101,G102,G106,G107,G108,G109,G110,G201,G202,G203,G303,G305,G401,G402,G403,G404,G501,G502,G503,G504,G505 \
             -exclude-dir=.go ./...
 
