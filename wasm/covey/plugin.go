@@ -117,6 +117,12 @@ type Description struct {
 	// operator a button that can only fail.
 	Probe bool `json:"probe,omitempty"`
 	Poll  bool `json:"poll,omitempty"`
+	// SignsItems says that Poll's signature is one "<key>@<version>" entry
+	// per waiting item, sorted and comma-joined — the shape of the SDK's
+	// target.WorkSignature — so that a host may read it item by item (one
+	// workflow case per ticket). The wasm counterpart of target.ItemSigner;
+	// set it only when the signature has exactly that shape.
+	SignsItems bool `json:"signs_items,omitempty"`
 	// Workdir declares that this module reads files out of the agent's
 	// workspace. Without it a ReadFile is refused.
 	Workdir bool `json:"workdir,omitempty"`
