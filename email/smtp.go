@@ -63,18 +63,16 @@ func buildMessage(o outgoing, now time.Time) []byte {
 // Auth only if the server offers it (test doubles and internal relays get by
 // without it).
 func dialSMTP(cfg Config) (*smtp.Client, error) {
-	var c *smtp.Client
-	var err error
-	if cfg.SMTPTLS == tlsImplicit {
-		conn, dialErr := tls.Dial("tcp", cfg.SMTPAddr, tlsConfig(cfg.SMTPHost))
-		if dialErr != nil {
-			return nil, fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, dialErr)
-		}
-		c, err = smtp.NewClient(conn, cfg.SMTPHost)
-	} else {
-		c, err = smtp.Dial(cfg.SMTPAddr)
-	}
+	conn, err := dialTCP(cfg.SMTPAddr)
 	if err != nil {
+		return nil, fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, err)
+	}
+	if cfg.SMTPTLS == tlsImplicit {
+		conn = tls.Client(conn, tlsConfig(cfg.SMTPHost))
+	}
+	c, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("smtp connection %s: %w", cfg.SMTPAddr, err)
 	}
 	if cfg.SMTPTLS == tlsStartTLS {
