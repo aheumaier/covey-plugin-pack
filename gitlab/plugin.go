@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -217,7 +217,7 @@ func (System) HasWorkKind(ctx context.Context, cred target.Credential, kind stri
 func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind string) (bool, string, error) {
 	gc := NewClient(cred.BaseURL, cred.Token)
 	var (
-		waiting []string
+		waiting []target.WorkEntry
 		err     error
 	)
 	if f, ok, gateErr := issueGate(kind); ok {
@@ -243,7 +243,7 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 		// Without a sub-scope both count — issues AND one's own review loop.
 		waiting, err = issueWorkPending(ctx, gc, false)
 		if err == nil {
-			var mrs []string
+			var mrs []target.WorkEntry
 			if mrs, err = mrReviewPending(ctx, gc); err == nil {
 				waiting = append(waiting, mrs...)
 			}
@@ -344,14 +344,14 @@ const issueMaxNotesChecks = 30
 // comment there.** A silent run counts as "not yet worked on" and wakes again
 // — with a real handoff, that comment now needs to change the note count for
 // the new signature to differ, which any real comment does.
-func issueWorkPending(ctx context.Context, gc *Client, assignedOnly bool) ([]string, error) {
+func issueWorkPending(ctx context.Context, gc *Client, assignedOnly bool) ([]target.WorkEntry, error) {
 	return issuesWaiting(ctx, gc, IssueFilter{State: "opened", Assigned: assignedOnly})
 }
 
 // issuesWaiting is issueWorkPending for any filter. With f.Project the list
 // comes from that project alone (GET /projects/{path}/issues), and the
 // installation-wide intake scope still applies on top.
-func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter) ([]string, error) {
+func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter) ([]target.WorkEntry, error) {
 	issues, err := gc.ListIssuesWhere(ctx, 0, f)
 	if err != nil {
 		return nil, err
@@ -381,7 +381,7 @@ func issuesWaiting(ctx context.Context, gc *Client, f IssueFilter) ([]string, er
 		// another opens leaves it unchanged.
 		return issueStampSigs(inScope), nil
 	}
-	var waiting []string
+	var waiting []target.WorkEntry
 	for _, i := range inScope {
 		// The internal window: the check needs the END of the thread — the last
 		// comment and the highest note id. It does not go into any context, so it
@@ -430,10 +430,10 @@ func abridgeIssue(i Issue) Issue {
 // issue's identity alone. That is the previous behavior for that issue, not an
 // error: the gate then still notices it arriving or leaving, just not edits to
 // it.
-func issueStampSigs(issues []Issue) []string {
-	out := make([]string, 0, len(issues))
+func issueStampSigs(issues []Issue) []target.WorkEntry {
+	out := make([]target.WorkEntry, 0, len(issues))
 	for _, i := range issues {
-		out = append(out, fmt.Sprintf("issue%d!%d@%s", i.ProjectID, i.IID, i.UpdatedAt))
+		out = append(out, target.WorkEntry{Key: fmt.Sprintf("issue%d!%d", i.ProjectID, i.IID), Version: i.UpdatedAt})
 	}
 	return out
 }
@@ -443,27 +443,29 @@ func issueStampSigs(issues []Issue) []string {
 // the highest note id of the thread. GitLab hands out note ids monotonically
 // and records pushes as a system note too — new commits therefore change the
 // signature along with them without costing an additional request.
-func threadSig(kind string, projectID, iid int, notes []Note) string {
+func threadSig(kind string, projectID, iid int, notes []Note) target.WorkEntry {
 	last := 0
 	for _, n := range notes {
 		if n.ID > last {
 			last = n.ID
 		}
 	}
-	return fmt.Sprintf("%s%d!%d@%d", kind, projectID, iid, last)
+	return target.WorkEntry{Key: fmt.Sprintf("%s%d!%d", kind, projectID, iid), Version: strconv.Itoa(last)}
 }
 
-// workSig condenses the waiting items into a stable signature. Sorted, because
-// GitLab returns them by updated_at — otherwise the signature would change
-// through the order alone.
-func workSig(waiting []string) string {
-	if len(waiting) == 0 {
-		return ""
-	}
-	sorted := append([]string(nil), waiting...)
-	sort.Strings(sorted)
-	return strings.Join(sorted, ",")
+// workSig condenses the waiting items into the SDK's work signature: one
+// "<key>@<version>" entry per item, sorted, because GitLab returns them by
+// updated_at — otherwise the signature would change through the order alone.
+// A host reads the items back from it (covey's workflows run one case per
+// item); the string is the same one this plugin always wrote, so no gated
+// heartbeat sees a change on the upgrade.
+func workSig(waiting []target.WorkEntry) string {
+	return target.WorkSignature(waiting)
 }
+
+// SignsWorkItems (target.ItemSigner): every kind of this gate signs its
+// waiting issues and merge requests item by item, through workSig.
+func (System) SignsWorkItems() bool { return true }
 
 // lastHumanNoteIsMine is retained only for the reviewer-assigned path. That
 // path is currently unused and must not be changed into level detection (and a
@@ -503,7 +505,7 @@ func lastHumanNoteIsMine(notes []Note, me string) bool {
 // agent's own idempotency check (list_mr_notes before acting) absorbs that
 // cheaply, run after run, at a fraction of the cost of never being woken at
 // all.
-func mrReviewPending(ctx context.Context, gc *Client) ([]string, error) {
+func mrReviewPending(ctx context.Context, gc *Client) ([]target.WorkEntry, error) {
 	mrs, err := gc.ListMyOpenMergeRequests(ctx)
 	if err != nil {
 		return nil, err
@@ -517,7 +519,7 @@ func mrReviewPending(ctx context.Context, gc *Client) ([]string, error) {
 	if len(inScope) == 0 {
 		return nil, nil
 	}
-	var waiting []string
+	var waiting []target.WorkEntry
 	for _, m := range inScope {
 		p, err := gc.ListMRNotes(ctx, m.ProjectID, m.IID, notesWindowInternal, 1)
 		if err != nil {
@@ -548,7 +550,7 @@ func mrReviewPending(ctx context.Context, gc *Client) ([]string, error) {
 // to level detection would only plant a review loop for future callers. Before
 // enabling nur-wenn: gitlab:review under a shared identity, it needs a durable
 // per-agent reviewed-head marker.
-func mrReviewAssignedPending(ctx context.Context, gc *Client) ([]string, error) {
+func mrReviewAssignedPending(ctx context.Context, gc *Client) ([]target.WorkEntry, error) {
 	me, err := gc.CurrentUser(ctx)
 	if err != nil {
 		return nil, err
@@ -557,7 +559,7 @@ func mrReviewAssignedPending(ctx context.Context, gc *Client) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	var waiting []string
+	var waiting []target.WorkEntry
 	for _, m := range mrs {
 		if !projectInScope(m.ProjectID, mrProjectPath(m)) {
 			continue

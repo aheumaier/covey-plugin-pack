@@ -3813,3 +3813,26 @@ func TestIssueGate(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkSignatureKeepsItsTextAndReadsBackAsItems pins the signature string
+// across the move to the SDK's WorkSignature (#51): it is the watermark every
+// gated heartbeat compares, and a changed text would wake each agent once more
+// for work it has seen. And a host can read the items back out of it.
+func TestWorkSignatureKeepsItsTextAndReadsBackAsItems(t *testing.T) {
+	waiting := []target.WorkEntry{
+		threadSig("mr", 7, 9, []Note{{ID: 50}, {ID: 48}}),
+		threadSig("issue", 7, 3, []Note{{ID: 42}}),
+	}
+	waiting = append(waiting, issueStampSigs([]Issue{{ProjectID: 8, IID: 1, UpdatedAt: "2026-10-01T09:00:00Z"}})...)
+	sig := workSig(waiting)
+	if want := "issue7!3@42,issue8!1@2026-10-01T09:00:00Z,mr7!9@50"; sig != want {
+		t.Fatalf("signature = %q, want %q", sig, want)
+	}
+	if !target.SignsItems(System{}) {
+		t.Fatal("the gate does not say that it signs items")
+	}
+	items, ok := target.WorkEntries(sig)
+	if !ok || len(items) != 3 || items[0].Key != "issue7!3" || items[2].Version != "50" {
+		t.Fatalf("items read back as %v, %v", items, ok)
+	}
+}
