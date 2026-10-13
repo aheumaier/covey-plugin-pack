@@ -2,6 +2,7 @@ package email
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"mime"
@@ -54,13 +55,20 @@ func dialIMAP(cfg Config) (*imapclient.Client, error) {
 	opts := &imapclient.Options{
 		WordDecoder: &mime.WordDecoder{CharsetReader: charset.Reader},
 	}
+	conn, err := dialTCP(cfg.IMAPAddr)
+	if err != nil {
+		return nil, err
+	}
 	switch cfg.IMAPTLS {
 	case tlsImplicit:
-		return imapclient.DialTLS(cfg.IMAPAddr, opts)
+		tc := tlsConfig(cfg.IMAPHost)
+		tc.NextProtos = []string{"imap"}
+		return imapclient.New(tls.Client(conn, tc), opts), nil
 	case tlsStartTLS:
-		return imapclient.DialStartTLS(cfg.IMAPAddr, opts)
+		opts.TLSConfig = tlsConfig(cfg.IMAPHost)
+		return imapclient.NewStartTLS(conn, opts)
 	default:
-		return imapclient.DialInsecure(cfg.IMAPAddr, opts)
+		return imapclient.New(conn, opts), nil
 	}
 }
 
