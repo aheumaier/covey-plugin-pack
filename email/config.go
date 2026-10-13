@@ -3,6 +3,7 @@ package email
 import (
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"os"
 	"strings"
@@ -27,7 +28,10 @@ import (
 // 465), smtp (STARTTLS, 587). For tests/demos additionally imap+insecure /
 // smtp+insecure (plaintext, default ports 143/25). The sender address is the
 // username; if the login differs from the mail address, ?from=agent@example.com
-// on the SMTP URL sets it explicitly.
+// on the SMTP URL sets it explicitly. cc=person@example.com on the SMTP URL
+// (repeatable: ?cc=a@example.com&cc=b@example.com) puts that address in copy of
+// every mail the agent sends — reply and send alike, set once by the
+// installation instead of asked of the agent in its prompt.
 
 // TLS mode of a connection.
 const (
@@ -47,6 +51,8 @@ type Config struct {
 	Username string
 	Password string
 	From     string // sender address (default: username)
+	// Cc is the fixed copy from cc= on the SMTP URL: on every outgoing mail.
+	Cc []string
 }
 
 // ParseConfig decomposes the brokered credential into the mail configuration.
@@ -100,6 +106,13 @@ func ParseConfig(cred target.Credential) (Config, error) {
 			cfg.SMTPAddr, cfg.SMTPHost, cfg.SMTPTLS = net.JoinHostPort(host, port), host, mode
 			if from := u.Query().Get("from"); from != "" {
 				cfg.From = from
+			}
+			for _, cc := range u.Query()["cc"] {
+				a, err := mail.ParseAddress(strings.TrimSpace(cc))
+				if err != nil {
+					return Config{}, fmt.Errorf("email_url: cc %q is not a mail address: %w", cc, err)
+				}
+				cfg.Cc = append(cfg.Cc, a.Address)
 			}
 		}
 	}

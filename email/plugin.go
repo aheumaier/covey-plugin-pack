@@ -183,11 +183,14 @@ var actions = map[string]actionFunc{
 		if len(to) == 0 {
 			return nil, fmt.Errorf("to: no valid address")
 		}
-		o := outgoing{From: cfg.From, To: to, Cc: cc, Subject: in.Subject, Body: in.Body}
+		o := outgoing{From: cfg.From, To: to, Subject: in.Subject, Body: in.Body}
+		if o.Cc, err = mergeCc(cfg, o.To, cc, cfg.Cc); err != nil {
+			return nil, err
+		}
 		if err := sendMail(cfg, o); err != nil {
 			return nil, err
 		}
-		return map[string]any{"sent_to": to, "cc": cc, "subject": in.Subject}, nil
+		return map[string]any{"sent_to": to, "cc": o.Cc, "subject": in.Subject}, nil
 	},
 	"reply": func(ctx context.Context, cfg Config, action string, in actionParams) (any, error) {
 		if in.UID == 0 || strings.TrimSpace(in.Body) == "" {
@@ -199,6 +202,9 @@ var actions = map[string]actionFunc{
 		}
 		o, err := buildReply(cfg, orig, in.Body, in.ReplyAll)
 		if err != nil {
+			return nil, err
+		}
+		if o.Cc, err = mergeCc(cfg, o.To, o.Cc, in.Cc, cfg.Cc); err != nil {
 			return nil, err
 		}
 		if err := sendMail(cfg, o); err != nil {
@@ -286,6 +292,30 @@ func buildReply(cfg Config, orig *Message, body string, replyAll bool) (outgoing
 	}, nil
 }
 
+// mergeCc joins copy lists in order: each address once, never the agent's own
+// and never one already among the primary recipients. Every address passes
+// parseAddrs, so the send allowlist holds for a copy as for a recipient.
+func mergeCc(cfg Config, to []string, lists ...[]string) ([]string, error) {
+	seen := map[string]bool{strings.ToLower(cfg.From): true}
+	for _, a := range to {
+		seen[strings.ToLower(a)] = true
+	}
+	out := []string{}
+	for _, l := range lists {
+		addrs, err := parseAddrs("cc", l)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range addrs {
+			if k := strings.ToLower(a); !seen[k] {
+				seen[k] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (System) PromptDoc() string {
 	return `Available email actions (your own mailbox, IMAP/SMTP): list_mailboxes {},
    list_unread {"mailbox":"INBOX","limit":20} lists unread mail (newest first; mailbox/limit optional),
@@ -295,9 +325,11 @@ func (System) PromptDoc() string {
    get_attachment {"uid":N,"mailbox":"INBOX","name":"invoice.pdf"} loads ONE attachment of that mail into the
    sandbox (under attachments/) and returns its path; then look at it with the read tool (images by
    vision). The name comes from the attachment list of get_message,
-   reply {"uid":N,"mailbox":"INBOX","body":"...","reply_all":true|false} answers the sender by SMTP
-   (correct threading headers, subject Re: …) and marks the mail as read afterwards,
+   reply {"uid":N,"mailbox":"INBOX","body":"...","reply_all":true|false,"cc":["..."]} answers the sender
+   by SMTP (correct threading headers, subject Re: …; cc adds people in copy) and marks the mail as
+   read afterwards,
    send {"to":["a@example.com"],"cc":["..."],"subject":"...","body":"..."} sends a new mail,
+   (a copy the installation configured is added to every reply and send by itself),
    mark_seen {"uid":N,"mailbox":"..."} / mark_unseen {...} sets or clears the read flag,
    move {"uid":N,"mailbox":"INBOX","to_mailbox":"Archive"} moves a mail into another folder.
    How to work: your working set is the unread mail (list_unread). Work every mail individually:
