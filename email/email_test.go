@@ -802,3 +802,54 @@ func TestExecuteUnknownAction(t *testing.T) {
 		t.Fatal("error expected")
 	}
 }
+
+func TestParseConfigFixedCc(t *testing.T) {
+	cfg, err := ParseConfig(target.Credential{
+		BaseURL: "imaps://h:993 smtp://h:587?from=bot@example.com&cc=ada@example.com&cc=ben@example.com",
+		Token:   "login:pw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.From != "bot@example.com" || strings.Join(cfg.Cc, ",") != "ada@example.com,ben@example.com" {
+		t.Fatalf("cfg: %+v", cfg)
+	}
+	if _, err := ParseConfig(target.Credential{BaseURL: "imaps://h smtp://h?cc=nobody", Token: "a@example.com:pw"}); err == nil {
+		t.Fatal("a cc that is no address has to be an error, not a dropped copy")
+	}
+}
+
+func TestExecuteReplyCopies(t *testing.T) {
+	imapAddr := newMemIMAP(t, testUser, "pw")
+	smtp := newFakeSMTP(t)
+	cred := testCred(t, imapAddr, smtp.ln.Addr().String())
+	cred.BaseURL += "?cc=lead@example.com"
+
+	appendMail(t, imapAddr, testUser, "pw",
+		"From: Kunde <kunde@example.com>\r\nTo: agent@example.com\r\nSubject: Login\r\nMessage-ID: <c1@example.com>\r\n\r\nGeht nicht.\r\n", false)
+	uid := exec(t, cred, "list_unread", `{}`).([]MessageSummary)[0].UID
+
+	// cc on the reply plus the fixed copy; the customer and the agent itself are dropped from the copy.
+	exec(t, cred, "reply", fmt.Sprintf(`{"uid":%d,"body":"Wir sehen nach.","cc":["kollegin@example.com","kunde@example.com","%s","LEAD@example.com"]}`, uid, testUser))
+	_, rcpts, data := smtp.snapshot()
+	if strings.Join(rcpts, ",") != "kunde@example.com,kollegin@example.com,LEAD@example.com" {
+		t.Fatalf("envelope: %v", rcpts)
+	}
+	if !strings.Contains(data, "Cc: kollegin@example.com, LEAD@example.com\r\n") || !strings.Contains(data, "In-Reply-To: <c1@example.com>") {
+		t.Fatalf("message:\n%s", data)
+	}
+
+	// send carries the fixed copy as well.
+	exec(t, cred, "send", `{"to":["kunde@example.com"],"subject":"Nachtrag","body":"x"}`)
+	// The fake server keeps the envelope of every session; the last two are this send.
+	if _, rcpts, _ = smtp.snapshot(); len(rcpts) < 2 || strings.Join(rcpts[len(rcpts)-2:], ",") != "kunde@example.com,lead@example.com" {
+		t.Fatalf("send envelope: %v", rcpts)
+	}
+
+	// The send allowlist holds for a copy as for a recipient.
+	t.Setenv("COVEY_EMAIL_SEND_DOMAINS", "example.com")
+	if _, err := (System{}).Execute(context.Background(), "send",
+		json.RawMessage(`{"to":["kunde@example.com"],"cc":["boese@evil.io"],"subject":"x","body":"y"}`), cred); err == nil {
+		t.Fatal("a copy outside the allowlist has to fail")
+	}
+}
