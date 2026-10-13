@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/benjaminLedel/covey-plugin-pack/wasm/covey"
+	"github.com/benjaminLedel/covey-plugin-sdk/target"
 )
 
 // The webhook decision is the whole reason this plugin is code rather than a
@@ -111,7 +112,7 @@ func TestDescribeDeclaresWhatTheHostNeeds(t *testing.T) {
 	if !d.Probe {
 		t.Error("probe is implemented, so it has to be declared")
 	}
-	if !d.Poll {
+	if !d.Poll || !d.SignsItems {
 		t.Error("the module polls, so it has to say so — or the host never asks")
 	}
 	want := map[string]string{
@@ -315,8 +316,14 @@ func TestPollFollowsTheKind(t *testing.T) {
 	if err != nil || !has {
 		t.Fatalf("has=%v err=%v", has, err)
 	}
-	if sig != "zammad:assigned:ticket:11@2026-10-05T10:00:00Z,ticket:12@2026-10-05T11:00:00Z" {
+	if sig != "ticket:11@2026-10-05T10:00:00Z,ticket:12@2026-10-05T11:00:00Z" {
 		t.Fatalf("sig=%q", sig)
+	}
+	// What the descriptor promises with SignsItems: the SDK reads it back
+	// item by item, one key per ticket (#61).
+	items, ok := target.WorkEntries(sig)
+	if !ok || len(items) != 2 || items[0].Key != "ticket:11" || items[1].Key != "ticket:12" {
+		t.Fatalf("not readable item by item: %v %v", items, ok)
 	}
 	if v := selectorValues(f.lastSearch, "ticket.owner_id"); v != "7" {
 		t.Fatalf("assigned looks at the token's user: %q", v)
@@ -401,7 +408,7 @@ func TestPollPendingSuffixAddsReminderStates(t *testing.T) {
 	if v := selectorValues(f.lastSearch, "ticket.owner_id"); v != "7,3" {
 		t.Fatalf("the suffix must not end up in the owner's name: %q", v)
 	}
-	if sig != "zammad:owner:ben@example.org:pending:ticket:21@2026-10-13T08:51:03Z" {
+	if sig != "ticket:21@2026-10-13T08:51:03Z" {
 		t.Fatalf("the pending heartbeat keeps a watermark of its own: %q", sig)
 	}
 

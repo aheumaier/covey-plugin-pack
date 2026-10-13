@@ -44,6 +44,9 @@ func (plugin) Describe() covey.Description {
 		Probe:   true,
 		// The pre-check behind nur-wenn: zammad — see Poll.
 		Poll: true,
+		// One entry per ticket (see Poll): a workflow on a Zammad gate runs
+		// one case per ticket, zammad:ticket:<id>.
+		SignsItems: true,
 		Actions: []covey.ActionDesc{
 			{Name: "list_tickets", Scope: "read", Doc: `{"owner":"me"|"nobody"|"<login or e-mail>","state":"open"|"pending"|"any"|"<state name>","limit":N} — the tickets assigned to an owner, newest activity first. Defaults: owner "me" (your own Zammad user; name a login or e-mail to see a colleague's queue), state "open" (new + open; pending, closed and merged are not work), limit 20. State "pending" is the tickets waiting on a reminder, whatever the instance calls that state.`},
 			{Name: "search_tickets", Scope: "read", Doc: `{"query":"…","limit":N} — full-text search over title, number and articles, for "has the house answered this before".`},
@@ -439,6 +442,12 @@ const pollMaxTickets = 100
 // only when it changes: an agent that reads a ticket and deliberately ends
 // without writing is not woken again by the same ticket a minute later, and
 // is woken the moment the customer writes, because that moves updated_at.
+//
+// It is nothing but those entries, sorted and comma-joined — the shape a host
+// reads item by item (SignsItems, #61). It used to carry "zammad:<kind>:" in
+// front, to keep two queues' watermarks apart; covey keeps a watermark per
+// heartbeat, so the prefix kept nothing apart and only made the first entry's
+// key unreadable.
 func (plugin) Poll(kind string) (bool, string, error) {
 	kind, withPending := cutPending(kind)
 	owners, err := pollOwners(kind)
@@ -468,11 +477,7 @@ func (plugin) Poll(kind string) (bool, string, error) {
 		entries = append(entries, fmt.Sprintf("ticket:%d@%s", t.ID, t.UpdatedAt))
 	}
 	sort.Strings(entries) // stable: the search order is by activity, the signature must not be
-	family := pollKind(kind)
-	if withPending {
-		family += ":pending"
-	}
-	return true, "zammad:" + family + ":" + strings.Join(entries, ","), nil
+	return true, strings.Join(entries, ","), nil
 }
 
 // cutPending splits the ":pending" suffix off a poll kind.
