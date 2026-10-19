@@ -1,0 +1,85 @@
+{
+  "name": "productboard",
+  "label": "Productboard",
+  "description": "Product management: read features, products and customer feedback, file and link feedback, update features.",
+  "category": "other",
+  "auth": {
+    "header": "Authorization",
+    "format": "Bearer {token}"
+  },
+  "scopes": ["read", "notes", "write"],
+  "probe": {
+    "path": "/v2/entities/configurations"
+  },
+  "poll": {
+    "": {
+      "path": "/v2/notes?processed=false",
+      "items_field": "data",
+      "key_field": "id",
+      "signature_field": "updatedAt"
+    }
+  },
+  "actions": {
+    "list_entity_types": {
+      "method": "GET",
+      "path": "/v2/entities/configurations",
+      "scope": "read",
+      "doc": "which entity types (feature, product, component, release, …) and fields this workspace has; no params"
+    },
+    "list_entities": {
+      "method": "GET",
+      "path": "/v2/entities",
+      "scope": "read",
+      "doc": "find features, products, components, releases; params: type[] (e.g. [\"feature\"]), name (exact), status[name], parent[id], owner[email], archived, fields[] ([\"all\"] or names), pageCursor (from links.next)"
+    },
+    "get_entity": {
+      "method": "GET",
+      "path": "/v2/entities/{id}",
+      "scope": "read",
+      "doc": "read one entity with all its fields; params: id"
+    },
+    "list_entity_relationships": {
+      "method": "GET",
+      "path": "/v2/entities/{id}/relationships",
+      "scope": "read",
+      "doc": "parent, children, release and linked notes of an entity; params: id, pageCursor"
+    },
+    "list_notes": {
+      "method": "GET",
+      "path": "/v2/notes",
+      "scope": "read",
+      "doc": "find customer feedback; params: processed, archived, type[] (textNote, conversationNote, opportunityNote, …), createdFrom, createdTo, updatedFrom, updatedTo (ISO-8601), owner[email], pageCursor"
+    },
+    "get_note": {
+      "method": "GET",
+      "path": "/v2/notes/{id}",
+      "scope": "read",
+      "doc": "read one note; params: id"
+    },
+    "list_note_relationships": {
+      "method": "GET",
+      "path": "/v2/notes/{id}/relationships",
+      "scope": "read",
+      "doc": "the customer and the features a note is linked to; params: id"
+    },
+    "create_note": {
+      "method": "POST",
+      "path": "/v2/notes",
+      "scope": "notes",
+      "doc": "file customer feedback; params: data={\"type\":\"textNote\",\"fields\":{\"name\":\"…\",\"content\":\"…\",\"tags\":[{\"name\":\"…\"}]},\"relationships\":[{\"type\":\"customer\",\"target\":{\"email\":\"…\",\"type\":\"user\"}}],\"metadata\":{\"source\":{\"system\":\"…\",\"recordId\":\"…\",\"url\":\"…\"}}}"
+    },
+    "link_note": {
+      "method": "POST",
+      "path": "/v2/notes/{id}/relationships",
+      "scope": "notes",
+      "doc": "link a note to the feature it asks for; params: id (the note), data={\"type\":\"link\",\"target\":{\"id\":\"<entity id>\",\"type\":\"link\"}}"
+    },
+    "update_entity": {
+      "method": "PATCH",
+      "path": "/v2/entities/{id}",
+      "scope": "write",
+      "doc": "change an entity; params: id, data={\"fields\":{\"name\":\"…\"}} to overwrite values, or data={\"patch\":[{\"op\":\"addItems\",\"path\":\"tags\",\"value\":[…]}]} for list fields (set, addItems, removeItems, clear) — never both"
+    }
+  },
+  "prompt_doc": "Productboard is where the product team keeps its features and the customer feedback behind them. The API key comes from the platform — you never see it.\n\nLists come in pages: when links.next is set, call the same action again with pageCursor taken from that URL. Filters are query parameters with Productboard's own names, brackets included (type[], status[name]). Field names differ per workspace — list_entity_types tells you which exist before you write one.\n\nRequest bodies are wrapped in a single \"data\" object; pass it as one parameter. Read a feature before you change it, and link feedback to an existing feature rather than describing it again."
+}

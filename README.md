@@ -25,7 +25,7 @@ These used to live inside Covey's own repository, compiled in from `internal/`. 
 | `vulndb/` | OSV, GHSA, NVD | known vulnerabilities in declared dependencies |
 | `k8s/` | Kubernetes | read pods, logs, events and workloads; restart a Deployment, delete a stuck Pod. Secrets are never readable, and writes stay small because a GitOps cluster takes its desired state from its repository |
 
-**Manifest plugins** (`manifests/`, JSON — no Go, no rebuild): Redmine, Gitea/Forgejo, OpenProject. These are listed in the [catalogue](https://github.com/benjaminLedel/covey-plugins) and installed at runtime.
+**Manifest plugins** (`manifests/`, JSON — no Go, no rebuild): Redmine, Gitea/Forgejo, OpenProject, Productboard. These are listed in the [catalogue](https://github.com/benjaminLedel/covey-plugins) and installed at runtime.
 
 **WebAssembly modules** (`wasm/`): `zammad`, `vulndb` and `k8s` exist a second time, as modules published through the [catalogue](https://github.com/benjaminLedel/covey-plugins) and installed at runtime like a manifest. The same three systems, in the form that carries the strongest promise: a module has no socket, no filesystem and never sees the credential. It says `GET /tickets/7`, and the host adds the base URL and the token the organisation stored — which is why a module cannot leak one. It has none, and nothing to leak it through.
 
