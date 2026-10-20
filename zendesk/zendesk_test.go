@@ -1798,7 +1798,7 @@ func TestPrecheckFingerprintsTheOpenQueue(t *testing.T) {
 		t.Errorf("the gate read %d tickets and %d audit pages: %v", ticketReads, audits, f.requests)
 	}
 
-	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("bot@acme.example/token:apitok")))
+	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("bot@acme.example/token:apitok"), nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1914,7 +1914,7 @@ func TestPrecheckWakesOnTheNewestTickets(t *testing.T) {
 
 	// The window moved, not just the answer: the one open ticket is in the set and
 	// the twenty old ones are not.
-	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("tok")))
+	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("tok"), nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2695,4 +2695,57 @@ func entryStrings(entries []target.WorkEntry, err error) ([]string, error) {
 		out[i] = e.Key + "@" + e.Version
 	}
 	return out, err
+}
+
+// TestGateKindNarrowsTheOpenSet: a gate with a kind names only the tickets the agent
+// acts on (#73) — one nobody has taken, or one handed over with a tag — so a move on
+// a ticket a colleague is working wakes nobody.
+func TestGateKindNarrowsTheOpenSet(t *testing.T) {
+	f := newFake(t)
+	untouched := f.addTicket(50, 101, 9, "open", "Neu, niemand dran")
+	untouched["group_id"], untouched["assignee_id"] = nil, nil
+	f.addTicket(51, 101, 9, "open", "Kollege arbeitet")
+	handed := f.addTicket(52, 101, 9, "pending", "An den Bot gegeben")
+	handed["tags"] = []string{"covey", "Rüdi"}
+	grouped := f.addTicket(53, 101, 9, "open", "Gruppe, kein Bearbeiter")
+	grouped["assignee_id"] = nil
+
+	cred := f.cred("bot@acme.example/token:apitok")
+	keys := func(kind string) []string {
+		t.Helper()
+		_, sig, err := (System{}).HasWorkSigned(context.Background(), cred, kind)
+		if err != nil {
+			t.Fatalf("kind %q: %v", kind, err)
+		}
+		items, ok := target.WorkEntries(sig)
+		if !ok {
+			t.Fatalf("kind %q: not items: %q", kind, sig)
+		}
+		var out []string
+		for _, it := range items {
+			out = append(out, it.Key)
+		}
+		return out
+	}
+	if got := keys(""); len(got) != 4 {
+		t.Errorf("no kind: %v, want all four open tickets", got)
+	}
+	if got := keys("unassigned"); !slices.Equal(got, []string{"ticket:50"}) {
+		t.Errorf("unassigned: %v", got)
+	}
+	if got := keys("tag:rüdi"); !slices.Equal(got, []string{"ticket:52"}) {
+		t.Errorf("tag:rüdi: %v", got)
+	}
+	if got := keys("unassigned|tag:rüdi"); !slices.Equal(got, []string{"ticket:50", "ticket:52"}) {
+		t.Errorf("unassigned|tag:rüdi: %v", got)
+	}
+
+	// Nothing of the agent's in the queue: no work, even with tickets open.
+	if has, _, _ := (System{}).HasWorkSigned(context.Background(), cred, "tag:niemand"); has {
+		t.Error("a tag nobody carries reported work")
+	}
+	// A typo is an error, never the whole queue.
+	if _, _, err := (System{}).HasWorkSigned(context.Background(), cred, "unasigned"); err == nil {
+		t.Error("an unknown kind was accepted")
+	}
 }
