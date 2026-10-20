@@ -106,6 +106,7 @@ type params struct {
 	Path         string   `json:"path"`
 	Content      string   `json:"content"`
 	Save         string   `json:"save"`
+	URL          string   `json:"url"`
 }
 
 // toList reads "to" as one address or a list of them.
@@ -325,6 +326,28 @@ var actions = map[string]action{
 			return nil, fmt.Errorf("site_id missing — list_sites names the sites")
 		}
 		return c.Drives(ctx, in.SiteID)
+	},
+	"open_link": func(ctx context.Context, c *Client, in params) (any, error) {
+		link := strings.TrimSpace(in.URL)
+		u, err := url.Parse(link)
+		if link == "" || err != nil || u.Scheme != "https" || u.Host == "" {
+			return nil, fmt.Errorf("url must be an https link to a SharePoint or OneDrive file or folder")
+		}
+		it, err := c.ResolveLink(ctx, link)
+		if err != nil {
+			if strings.Contains(err.Error(), "HTTP 403") || strings.Contains(err.Error(), "HTTP 404") {
+				return nil, fmt.Errorf("%w — the link is opened with the app's own permission, not with whom it was shared; a site the app was not granted (Sites.Selected) stays closed however the link was shared, and an operator grants it", err)
+			}
+			return nil, err
+		}
+		driveID, p := itemLocation(it)
+		out := map[string]any{"drive_id": driveID, "path": p, "name": it.Name, "item_id": it.ID, "web_url": it.WebURL, "folder": it.Folder != nil, "size": it.Size, "modified": it.LastModified}
+		if it.Folder != nil {
+			out["hint"] = "A folder: list_files with this drive_id and path shows what is in it."
+		} else {
+			out["hint"] = "A file: download_file with this drive_id and path, edit it in the sandbox, upload_file onto the same path."
+		}
+		return out, nil
 	},
 	"list_files": func(ctx context.Context, c *Client, in params) (any, error) {
 		p, err := cleanRemotePath(in.Path)
@@ -707,7 +730,8 @@ func (System) PromptDoc() string {
    (online = Teams meeting; attendees get an invitation) · respond_event {"id","response":"accept|decline|tentative","comment"}
    · cancel_event {"id","comment"} (as organiser) · free_busy {"emails":[],"from","until","timezone"}.
    FILES: drive_id "me" (or none) is your own OneDrive; for SharePoint, list_sites {"search":"words"} → list_drives {"site_id"} →
-   use the drive's id. list_files {"drive_id","path"} · search_files {"drive_id","query"} · read_file {"drive_id","path"} (text up to 1 MB)
+   use the drive's id. A LINK someone sent you (SharePoint, OneDrive, Teams files): open_link {"url"} answers drive_id and path —
+   use those with the actions below; never guess your way there by searching. list_files {"drive_id","path"} · search_files {"drive_id","query"} · read_file {"drive_id","path"} (text up to 1 MB)
    · download_file {"drive_id","path","save":"sandbox/path (optional)"} · upload_file {"drive_id","from":"sandbox/path","path":"remote/path"}
    (replaces what is there) · write_file {"drive_id","path","content"} (text) · create_folder {"drive_id","path"}.
    OFFICE FILES (docx, xlsx, pptx): download_file → edit in the sandbox with python3 (python-docx, openpyxl, python-pptx) →
