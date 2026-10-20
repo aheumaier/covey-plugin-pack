@@ -127,25 +127,11 @@ func (m *manager) ensureLocked() (context.Context, error) {
 	if p := strings.TrimSpace(os.Getenv("COVEY_BROWSER_CHROME_PATH")); p != "" {
 		opts = append(opts, chromedp.ExecPath(p))
 	}
-	// How long we wait for Chromium to announce its DevTools websocket.
-	//
-	// chromedp's default is 20 seconds, and that is too tight for a COLD start
-	// on a loaded machine: the end-to-end test failed in CI roughly every other
-	// run, always at exactly 20.0 s, always with "websocket url timeout
-	// reached". Re-running turned it green, which is the signature of a bound
-	// that is merely too small — and re-running a red build until it passes is
-	// not a fix, it is a habit that eventually hides a real failure.
-	//
-	// Tied to the action timeout on purpose: whoever grants a slow environment
-	// more time per action means the browser too, and a start that takes longer
-	// than a whole action is broken in a way no bound should paper over.
-	opts = append(opts, chromedp.WSURLReadTimeout(actionTimeout()))
-
 	// A cold start is attempted twice before it counts as broken.
 	//
-	// Raising the bound was the first answer and it is spent: the ceiling went
-	// from chromedp's 20 s to the action timeout, and CI then failed at 45.1 s
-	// with the same "websocket url timeout reached" (#11). A start that needs
+	// chromedp talks to the browser it starts through a pipe since v0.17, so the
+	// websocket-URL timeout that used to fail here (#11) no longer applies; the
+	// retry stays for the cold start that hangs in other ways. A start that needs
 	// more than a whole action is not slow, it is stuck — a lock in the profile
 	// directory, a process that came up without announcing its port — and the
 	// thing that reliably fixed it was starting again, which is what a human
@@ -167,7 +153,7 @@ func (m *manager) ensureLocked() (context.Context, error) {
 		// the long-lived browserCtx — NOT to a timeout child, whose cancel()
 		// would tear the tab down again right away. A missing Chromium surfaces
 		// here as a clear error (instead of only on the first navigation).
-		if err := chromedp.Run(browserCtx); err != nil {
+		if err := chromedp.Do(browserCtx); err != nil {
 			browserCancel()
 			allocCancel()
 			fehler = err
@@ -179,17 +165,25 @@ func (m *manager) ensureLocked() (context.Context, error) {
 	return nil, fmt.Errorf("chromium start failed twice (is chromium installed in the sandbox image?): %w", fehler)
 }
 
-// do runs a series of chromedp actions atomically and serialized.
-func (m *manager) do(tasks ...chromedp.Action) error {
+// run runs one chromedp action serialized and returns its value. A function
+// and not a method, because a method cannot take a type parameter.
+func run[T any](m *manager, a chromedp.Action[T]) (T, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	bctx, err := m.ensureLocked()
 	if err != nil {
-		return err
+		var zero T
+		return zero, err
 	}
 	runCtx, cancel := context.WithTimeout(bctx, actionTimeout())
 	defer cancel()
-	return chromedp.Run(runCtx, tasks...)
+	return chromedp.Run(runCtx, a)
+}
+
+// do runs a series of chromedp actions atomically and serialized.
+func (m *manager) do(steps ...chromedp.Action[chromedp.Void]) error {
+	_, err := run(m, chromedp.Steps(steps...))
+	return err
 }
 
 // shutdown terminates the browser when the sandbox shuts down — otherwise the
@@ -216,19 +210,13 @@ func (m *manager) setzeSicht(s Sicht) error {
 	if s.Skala <= 0 {
 		s.Skala = 1
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	bctx, err := m.ensureLocked()
-	if err != nil {
-		return err
-	}
-	runCtx, cancel := context.WithTimeout(bctx, actionTimeout())
-	defer cancel()
-	if err := chromedp.Run(runCtx, chromedp.EmulateViewport(s.Breite, s.Hoehe,
+	if err := m.do(chromedp.EmulateViewport(s.Breite, s.Hoehe,
 		chromedp.EmulateScale(s.Skala))); err != nil {
 		return err
 	}
+	m.mu.Lock()
 	m.sicht = s
+	m.mu.Unlock()
 	return nil
 }
 
