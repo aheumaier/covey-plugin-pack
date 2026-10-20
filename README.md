@@ -19,6 +19,7 @@ These used to live inside Covey's own repository, compiled in from `internal/`. 
 | `email/` | IMAP/SMTP | a mail account of its own: sift the inbox, read attachments, reply |
 | `teams/` | Microsoft Teams | a chat channel through the Azure Bot Service |
 | `sharepoint/` · `nextcloud/` | SharePoint, Nextcloud | document libraries: list, read, write, delete |
+| `m365/` | Microsoft 365 (Graph) | the agent's own Microsoft 365 user: its mailbox (read, reply, send, drafts, file away, attachments into the sandbox), its calendar (events, invitations, colleagues' free/busy), its OneDrive and the SharePoint sites the app may reach (find, search, download, upload — Office files are edited in the sandbox). Heartbeat intake on unread mail, one item per message |
 | `searchconsole/` | Google Search Console | what a search engine DID with a page, as opposed to what the page claims about itself: which addresses are indexed, which canonical Google chose instead of the declared one, what people searched for before they arrived, and which sitemaps arrived at all. Read-only but for one action — submitting a sitemap — and the OAuth scope is chosen per action, so an agent with `scope: read` holds a token that cannot write |
 | `browser/` | headless Chrome | the universal adapter for web applications without a plugin of their own |
 | `dev/` | the sandbox itself | shell commands, long-running processes, sub-agent runs inside a checkout |
