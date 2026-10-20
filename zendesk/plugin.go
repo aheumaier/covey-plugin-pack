@@ -94,6 +94,9 @@ func init() {
       Which of the open tickets is actually news stays the agent's judgement: no
       Zendesk field answers it, and the author of the newest comment does not
       either where an account takes its mail in through a shared address.
+      Narrow it to the tickets the agent acts on: nur-wenn: zendesk:unassigned
+      (no assignee and no group), zendesk:tag:<tag> (handed over with a tag),
+      or both, zendesk:unassigned|tag:<tag>. An unknown kind is an error.
    b) By webhook, if a ticket is to be picked up the moment it arrives. Create a
       webhook (Admin Center → Apps and extensions → Trigger and automation
       webhooks → Webhooks) with:

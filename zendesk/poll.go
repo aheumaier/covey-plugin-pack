@@ -2,6 +2,7 @@ package zendesk
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -41,11 +42,15 @@ func (System) HasWork(ctx context.Context, cred target.Credential) (bool, error)
 // a minute later by the same ticket. The moment anything happens on one of those
 // tickets the fingerprint changes and the wake happens.
 func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind string) (bool, string, error) {
+	match, err := gateFilter(kind)
+	if err != nil {
+		return false, "", err
+	}
 	c, err := NewClient(cred)
 	if err != nil {
 		return false, "", err
 	}
-	waiting, err := ticketsAwaitingReply(ctx, c)
+	waiting, err := ticketsAwaitingReply(ctx, c, match)
 	if err != nil {
 		return false, "", err
 	}
@@ -84,7 +89,7 @@ func (System) SignsWorkItems() bool { return true }
 // which of an account's statuses mean "waiting on somebody else" is the account's
 // convention and not this plugin's to guess. The agent sees the status in the list
 // and decides.
-func ticketsAwaitingReply(ctx context.Context, c *Client) ([]target.WorkEntry, error) {
+func ticketsAwaitingReply(ctx context.Context, c *Client, match func(Ticket) bool) ([]target.WorkEntry, error) {
 	// No status filter: the list endpoint takes exactly one, and "open" in Covey's
 	// sense is new, open, pending and hold together. One read without a filter,
 	// newest activity first, then the set narrowed here, costs one call instead of
@@ -98,9 +103,59 @@ func ticketsAwaitingReply(ctx context.Context, c *Client) ([]target.WorkEntry, e
 		if !isOpen(t.Status) || !t.InScope || !t.InIntakeScope {
 			continue
 		}
+		if match != nil && !match(t) {
+			continue
+		}
 		entries = append(entries, target.WorkEntry{Key: "ticket:" + strconv.FormatInt(t.ID, 10), Version: ticketState(t)})
 	}
 	return entries, nil
+}
+
+// gateFilter reads the kind of a gate — nur-wenn: zendesk:<kind> — as a narrowing of
+// the open set (#73). Without a kind every open ticket in scope counts, and every
+// move on any of them is news; where an agent only ever acts on some of them, that
+// is a wake (or a workflow case) per move on tickets that were never its business.
+//
+//	unassigned   no assignee AND no group: nobody has taken the ticket yet
+//	tag:<tag>    the ticket carries the tag (a tagger field's value is a tag)
+//
+// Alternatives are joined with "|": "unassigned|tag:rüdi" is a ticket nobody has
+// taken, or one somebody handed over with that tag. A kind the plugin does not know
+// is an error rather than "everything": a typo must not quietly wake on the whole
+// queue.
+func gateFilter(kind string) (func(Ticket) bool, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return nil, nil
+	}
+	var tests []func(Ticket) bool
+	for _, alt := range strings.Split(kind, "|") {
+		alt = strings.TrimSpace(alt)
+		switch {
+		case alt == "unassigned":
+			tests = append(tests, func(t Ticket) bool { return t.AssigneeID == 0 && t.GroupID == 0 })
+		case strings.HasPrefix(alt, "tag:") && strings.TrimSpace(alt[len("tag:"):]) != "":
+			tag := strings.ToLower(strings.TrimSpace(alt[len("tag:"):]))
+			tests = append(tests, func(t Ticket) bool {
+				for _, have := range t.Tags {
+					if strings.ToLower(have) == tag {
+						return true
+					}
+				}
+				return false
+			})
+		default:
+			return nil, fmt.Errorf("zendesk gate: unknown kind %q — expected unassigned or tag:<tag>, alternatives joined with |", alt)
+		}
+	}
+	return func(t Ticket) bool {
+		for _, test := range tests {
+			if test(t) {
+				return true
+			}
+		}
+		return false
+	}, nil
 }
 
 // ticketState is the half of an entry that has to change when the ticket changes.

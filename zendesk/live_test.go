@@ -250,7 +250,7 @@ func TestLiveHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := entryStrings(ticketsAwaitingReply(ctx, c))
+	entries, err := entryStrings(ticketsAwaitingReply(ctx, c, nil))
 	if err != nil {
 		t.Fatalf("ticketsAwaitingReply: %v", err)
 	}
