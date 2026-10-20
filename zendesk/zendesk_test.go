@@ -1768,8 +1768,19 @@ func TestPrecheckFingerprintsTheOpenQueue(t *testing.T) {
 	if !waiting {
 		t.Fatal("three tickets are open — the beat must fire")
 	}
-	if !strings.HasPrefix(sig, "zendesk:waiting@") {
-		t.Errorf("signature carries no system prefix: %s", sig)
+	// One entry per open ticket, readable as items (#71): a workflow on this gate
+	// runs one case per ticket, zendesk:ticket:<id>.
+	if !target.SignsItems(System{}) {
+		t.Error("the plugin does not say it signs item by item")
+	}
+	items, ok := target.WorkEntries(sig)
+	if !ok || len(items) != 3 {
+		t.Fatalf("signature is not three items: %q", sig)
+	}
+	for i, want := range []string{"ticket:42", "ticket:43", "ticket:44"} {
+		if items[i].Key != want {
+			t.Errorf("item %d: key %q, want %q", i, items[i].Key, want)
+		}
 	}
 
 	// One list read. The per-ticket reads the old gate spent were the price of an
@@ -1787,7 +1798,7 @@ func TestPrecheckFingerprintsTheOpenQueue(t *testing.T) {
 		t.Errorf("the gate read %d tickets and %d audit pages: %v", ticketReads, audits, f.requests)
 	}
 
-	entries, err := ticketsAwaitingReply(context.Background(), f.client("bot@acme.example/token:apitok"))
+	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("bot@acme.example/token:apitok")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1903,7 +1914,7 @@ func TestPrecheckWakesOnTheNewestTickets(t *testing.T) {
 
 	// The window moved, not just the answer: the one open ticket is in the set and
 	// the twenty old ones are not.
-	entries, err := ticketsAwaitingReply(context.Background(), f.client("tok"))
+	entries, err := entryStrings(ticketsAwaitingReply(context.Background(), f.client("tok")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2675,4 +2686,13 @@ func TestListTicketsNarrowsThroughTheSearch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// entryStrings writes work entries the way they stand in the signature.
+func entryStrings(entries []target.WorkEntry, err error) ([]string, error) {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Key + "@" + e.Version
+	}
+	return out, err
 }
