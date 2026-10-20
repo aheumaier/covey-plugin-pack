@@ -2,9 +2,6 @@ package zendesk
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -55,11 +52,16 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 	if len(waiting) == 0 {
 		return false, "", nil
 	}
-	return true, signature(waiting), nil
+	return true, target.WorkSignature(waiting), nil
 }
 
+// SignsWorkItems (target.ItemSigner): the signature is one entry per open ticket,
+// key "ticket:<id>", so a workflow on a Zendesk gate runs one case per ticket —
+// zendesk:ticket:<id>, the same string the webhook correlates on (#71).
+func (System) SignsWorkItems() bool { return true }
+
 // ticketsAwaitingReply returns one fingerprint entry per open ticket in this
-// agent's scope: "ticket:<id>@<updated_at>".
+// agent's scope: key "ticket:<id>", version <updated_at>.
 //
 // Both halves are read off the list row that has already been fetched, and that is
 // the point. The entry used to carry the id of the ticket's newest public comment,
@@ -82,7 +84,7 @@ func (System) HasWorkSigned(ctx context.Context, cred target.Credential, kind st
 // which of an account's statuses mean "waiting on somebody else" is the account's
 // convention and not this plugin's to guess. The agent sees the status in the list
 // and decides.
-func ticketsAwaitingReply(ctx context.Context, c *Client) ([]string, error) {
+func ticketsAwaitingReply(ctx context.Context, c *Client) ([]target.WorkEntry, error) {
 	// No status filter: the list endpoint takes exactly one, and "open" in Covey's
 	// sense is new, open, pending and hold together. One read without a filter,
 	// newest activity first, then the set narrowed here, costs one call instead of
@@ -91,12 +93,12 @@ func ticketsAwaitingReply(ctx context.Context, c *Client) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var entries []string
+	var entries []target.WorkEntry
 	for _, t := range tickets {
 		if !isOpen(t.Status) || !t.InScope || !t.InIntakeScope {
 			continue
 		}
-		entries = append(entries, "ticket:"+strconv.FormatInt(t.ID, 10)+"@"+ticketState(t))
+		entries = append(entries, target.WorkEntry{Key: "ticket:" + strconv.FormatInt(t.ID, 10), Version: ticketState(t)})
 	}
 	return entries, nil
 }
@@ -125,23 +127,6 @@ func isStaff(role string) bool {
 		return true
 	}
 	return false
-}
-
-// signature folds the open set into one short, stable string. Sorted first because
-// the list's order is the account's and not ours, and a signature that changes when
-// nothing changed wakes agents for nothing.
-//
-// The hash is a fingerprint of state, not a security decision: what matters is
-// that the string changes when the tickets did. SHA-256 rather than something
-// shorter because nothing here needs a short string, and a blocklisted primitive
-// in a file nobody rereads is a suppression somebody has to justify every time
-// the scanner runs.
-func signature(waiting []string) string {
-	sorted := append([]string(nil), waiting...)
-	sort.Strings(sorted)
-	h := sha256.New()
-	h.Write([]byte(strings.Join(sorted, "|")))
-	return "zendesk:waiting@" + hex.EncodeToString(h.Sum(nil))
 }
 
 // sigWritingActions are the actions that can move the work signature: everything

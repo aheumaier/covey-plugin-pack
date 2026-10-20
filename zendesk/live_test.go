@@ -234,8 +234,8 @@ func TestLiveHeartbeat(t *testing.T) {
 	if first != second {
 		t.Errorf("the signature moved between two reads with nothing in between: %s → %s", first, second)
 	}
-	if !strings.HasPrefix(first, "zendesk:waiting@") {
-		t.Errorf("signature does not carry the system prefix: %s", first)
+	if _, ok := target.WorkEntries(first); !ok {
+		t.Errorf("signature is not a list of items: %s", first)
 	}
 	if !(System{}).WritesWorkSignature("zendesk:reply") {
 		t.Error("reply must count as a signature-changing action")
@@ -250,7 +250,7 @@ func TestLiveHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := ticketsAwaitingReply(ctx, c)
+	entries, err := entryStrings(ticketsAwaitingReply(ctx, c))
 	if err != nil {
 		t.Fatalf("ticketsAwaitingReply: %v", err)
 	}
