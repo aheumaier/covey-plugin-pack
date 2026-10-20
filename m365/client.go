@@ -6,6 +6,7 @@ package m365
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -659,6 +660,42 @@ func (c *Client) SearchDrive(ctx context.Context, driveID, query string, limit i
 	}
 	err := c.do(ctx, http.MethodGet, c.drivePath(driveID)+"/root/search(q='"+url.PathEscape(q)+"')?$top="+fmt.Sprint(limit)+"&$select=id,name,size,webUrl,lastModifiedDateTime,folder,file,parentReference", nil, &out)
 	return out.Value, err
+}
+
+// ResolveLink turns a sharing link — or a plain URL of a file or folder in
+// SharePoint or OneDrive — into the item it points at (#79). Graph's /shares
+// endpoint takes the URL encoded as "u!" plus unpadded base64url.
+//
+// What decides whether this works is the app's permission, not whom the link
+// was shared with: the agent works as the app, and a link shared with the
+// agent's user does not widen what the app may reach.
+func (c *Client) ResolveLink(ctx context.Context, link string) (Item, error) {
+	shareID := "u!" + strings.TrimRight(base64.URLEncoding.EncodeToString([]byte(link)), "=")
+	var it Item
+	err := c.do(ctx, http.MethodGet, c.Graph+"/v1.0/shares/"+shareID+"/driveItem?$select=id,name,size,webUrl,lastModifiedDateTime,folder,file,parentReference", nil, &it)
+	return it, err
+}
+
+// itemLocation is where an item stands in the terms the other actions take:
+// its drive and its path below the drive root ("" for the root itself).
+func itemLocation(it Item) (driveID, p string) {
+	if it.ParentReference == nil {
+		return "", ""
+	}
+	driveID = it.ParentReference.DriveID
+	_, rest, ok := strings.Cut(it.ParentReference.Path, "root:")
+	if !ok {
+		// No path below a root: the item is the root of its drive.
+		return driveID, ""
+	}
+	rest = strings.Trim(rest, "/")
+	if rest == "" {
+		return driveID, it.Name
+	}
+	if u, err := url.PathUnescape(rest); err == nil {
+		rest = u
+	}
+	return driveID, rest + "/" + it.Name
 }
 
 func (c *Client) Download(ctx context.Context, driveID, p string) (io.ReadCloser, string, error) {

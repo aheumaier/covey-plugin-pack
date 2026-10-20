@@ -118,6 +118,22 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, user+"/drive/root:/"), ":/content")
 		f.files[p] = body
 		json.NewEncoder(w).Encode(map[string]any{"id": "item-" + p, "name": filepath.Base(p), "size": len(body), "webUrl": "https://contoso.example/" + p})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1.0/shares/u!") && strings.HasSuffix(r.URL.Path, "/driveItem"):
+		enc := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.0/shares/u!"), "/driveItem")
+		raw, err := base64.RawURLEncoding.DecodeString(enc)
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		switch string(raw) {
+		case "https://contoso.sharepoint.com/:w:/s/Team/EAbC123":
+			io.WriteString(w, `{"id":"01XYZ","name":"Protokoll Teamrunde.docx","size":18000,"webUrl":"https://contoso.sharepoint.com/sites/Team/Shared%20Documents/Protokolle/Protokoll%20Teamrunde.docx","file":{"mimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},"parentReference":{"driveId":"b!team","path":"/drives/b!team/root:/Protokolle%202026"}}`)
+		case "https://contoso.sharepoint.com/sites/Team/Shared%20Documents":
+			io.WriteString(w, `{"id":"01ROOT","name":"root","webUrl":"https://contoso.sharepoint.com/sites/Team/Shared%20Documents","folder":{"childCount":4},"parentReference":{"driveId":"b!team"}}`)
+		default:
+			w.WriteHeader(403)
+			io.WriteString(w, `{"error":{"code":"accessDenied","message":"Access denied"}}`)
+		}
 	case r.Method == "GET" && r.URL.Path == user+"/mailFolders/inbox":
 		w.WriteHeader(404)
 	default:
@@ -327,12 +343,47 @@ func TestUnknownActionAndRegistration(t *testing.T) {
 	if _, err := (System{}).Execute(context.Background(), "delete_mail", nil, target.Credential{}); err == nil {
 		t.Error("an action that does not exist ran")
 	}
-	for _, a := range []string{"list_mail", "send_mail", "create_event", "upload_file", "search_files"} {
+	for _, a := range []string{"list_mail", "send_mail", "create_event", "upload_file", "search_files", "open_link"} {
 		if !strings.Contains((System{}).PromptDoc(), a) {
 			t.Errorf("PromptDoc does not name %s", a)
 		}
 		if _, ok := actions[a]; !ok {
 			t.Errorf("action %s missing", a)
+		}
+	}
+}
+
+// TestOpenLink: a sharing link resolves to the drive and path the other
+// actions take; a library link to its root; a site the app may not reach
+// says why sharing it does not help (#79).
+func TestOpenLink(t *testing.T) {
+	resetTokens()
+	f := newFakeGraph(t)
+	ctx := context.Background()
+
+	got, err := exec(t, f, ctx, "open_link", map[string]any{"url": "https://contoso.sharepoint.com/:w:/s/Team/EAbC123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["drive_id"] != "b!team" || got["path"] != "Protokolle 2026/Protokoll Teamrunde.docx" || got["folder"] != false {
+		t.Fatalf("file link: %v", got)
+	}
+
+	root, err := exec(t, f, ctx, "open_link", map[string]any{"url": "https://contoso.sharepoint.com/sites/Team/Shared%20Documents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root["drive_id"] != "b!team" || root["path"] != "" || root["folder"] != true {
+		t.Fatalf("library link: %v", root)
+	}
+
+	_, err = exec(t, f, ctx, "open_link", map[string]any{"url": "https://contoso.sharepoint.com/:x:/s/Finance/Ezzz"})
+	if err == nil || !strings.Contains(err.Error(), "not with whom it was shared") {
+		t.Errorf("forbidden link: %v", err)
+	}
+	for _, bad := range []string{"", "http://contoso.sharepoint.com/x", "file:///etc/passwd"} {
+		if _, err := exec(t, f, ctx, "open_link", map[string]any{"url": bad}); err == nil {
+			t.Errorf("url %q accepted", bad)
 		}
 	}
 }
