@@ -108,29 +108,38 @@ func (System) Execute(ctx context.Context, action string, params json.RawMessage
 		if err != nil {
 			return nil, err
 		}
-		var title, loc string
-		if err := super.do(
-			chromedp.Navigate(u),
-			chromedp.Title(&title),
-			chromedp.Location(&loc),
-		); err != nil {
+		page, err := run(super, func(ctx context.Context, t *chromedp.Target) (map[string]any, error) {
+			if _, err := chromedp.Navigate(u)(ctx, t); err != nil {
+				return nil, err
+			}
+			title, err := chromedp.Title()(ctx, t)
+			if err != nil {
+				return nil, err
+			}
+			loc, err := chromedp.Location()(ctx, t)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"url": loc, "title": title}, nil
+		})
+		if err != nil {
 			return nil, fmt.Errorf("navigate %q: %w", u, err)
 		}
-		return map[string]any{"url": loc, "title": title}, nil
+		return page, nil
 
 	case "content":
-		var text string
-		var task chromedp.Action
+		var task chromedp.Action[string]
 		if sel := strings.TrimSpace(in.Selector); sel != "" {
 			eff, err := resolveSelector(sel)
 			if err != nil {
 				return nil, fmt.Errorf("content: %w", err)
 			}
-			task = chromedp.Text(eff, &text, chromedp.ByQuery, chromedp.NodeVisible)
+			task = chromedp.Text(chromedp.CSS(eff), chromedp.NodeVisible)
 		} else {
-			task = chromedp.Evaluate(`document.body ? document.body.innerText : ""`, &text)
+			task = chromedp.Evaluate[string](`document.body ? document.body.innerText : ""`)
 		}
-		if err := super.do(task); err != nil {
+		text, err := run(super, task)
+		if err != nil {
 			return nil, fmt.Errorf("content: %w", err)
 		}
 		out := map[string]any{"text": text}
@@ -172,17 +181,17 @@ func (System) Execute(ctx context.Context, action string, params json.RawMessage
 				return nil, fmt.Errorf("highlight %q: %w", hl, err)
 			}
 		}
-		var buf []byte
-		shot := chromedp.CaptureScreenshot(&buf)
+		shot := chromedp.CaptureScreenshot()
 		if in.Full {
-			shot = chromedp.FullScreenshot(&buf, 90)
+			shot = chromedp.FullScreenshot(90)
 		}
-		if err := super.do(shot); err != nil {
+		buf, err := run(super, shot)
+		if err != nil {
 			return nil, fmt.Errorf("screenshot: %w", err)
 		}
 		// Remove the annotation overlay again — the page stays operable.
 		if strings.TrimSpace(in.Highlight) != "" {
-			_ = super.do(chromedp.Evaluate(`(()=>{const o=document.getElementById('covey-annot');if(o)o.remove();})()`, nil))
+			_ = super.do(chromedp.Evaluate[chromedp.Void](`(()=>{const o=document.getElementById('covey-annot');if(o)o.remove();})()`))
 		}
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return nil, err
@@ -209,7 +218,7 @@ func (System) Execute(ctx context.Context, action string, params json.RawMessage
 		if err != nil {
 			return nil, fmt.Errorf("click %q: %w", sel, err)
 		}
-		if err := super.do(chromedp.Click(eff, chromedp.ByQuery, chromedp.NodeVisible)); err != nil {
+		if err := super.do(chromedp.Click(chromedp.CSS(eff), chromedp.NodeVisible)); err != nil {
 			return nil, fmt.Errorf("click %q: %w", sel, err)
 		}
 		return map[string]any{"clicked": sel}, nil
@@ -223,7 +232,7 @@ func (System) Execute(ctx context.Context, action string, params json.RawMessage
 		if err != nil {
 			return nil, fmt.Errorf("type in %q: %w", sel, err)
 		}
-		if err := super.do(chromedp.SendKeys(eff, in.Text, chromedp.ByQuery, chromedp.NodeVisible)); err != nil {
+		if err := super.do(chromedp.SendKeys(chromedp.CSS(eff), in.Text, chromedp.NodeVisible)); err != nil {
 			return nil, fmt.Errorf("type in %q: %w", sel, err)
 		}
 		return map[string]any{"typed": sel}, nil
@@ -284,8 +293,8 @@ func resolveSelector(sel string) (string, error) {
   el.setAttribute('%s', '1');
   return hits.length;
 })()`, c, n, hitAttr, hitAttr, hitAttr)
-	var count int
-	if err := super.do(chromedp.Evaluate(js, &count)); err != nil {
+	count, err := run(super, chromedp.Evaluate[int](js))
+	if err != nil {
 		return "", fmt.Errorf("resolving :has-text: %w", err)
 	}
 	if count == 0 {
@@ -328,8 +337,8 @@ func annotate(highlight, label string) error {
   document.body.appendChild(c);
   return true;
 })()`, s, l)
-	var ok bool
-	if err := super.do(chromedp.Evaluate(js, &ok)); err != nil {
+	ok, err := run(super, chromedp.Evaluate[bool](js))
+	if err != nil {
 		return err
 	}
 	if !ok {
